@@ -1,7 +1,6 @@
 pub mod websocket;
 
 use std::net::ToSocketAddrs;
-use std::path::Path;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -26,6 +25,9 @@ pub struct Cli {
     /// Path to config file
     #[clap(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/config.toml"))]
     pub config: std::path::PathBuf,
+    /// Path to persistence file
+    #[clap(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/persist/token.txt"))]
+    pub persist: std::path::PathBuf,
 }
 
 #[derive(serde_derive::Serialize, serde_derive::Deserialize, Debug)]
@@ -55,7 +57,7 @@ async fn main() -> Result<(), eyre::Report> {
         ClientDefault::default_client_with_name(Some("my_chatbot".parse()?))?,
     );
 
-    let token_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/persist/token.txt"));
+    let token_path = &opts.persist;
 
     let mut token: Option<UserToken> = None;
 

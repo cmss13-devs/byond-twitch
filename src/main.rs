@@ -70,6 +70,7 @@ async fn main() -> Result<(), eyre::Report> {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?;
+
             token = Some(
                 twitch_oauth2::UserToken::from_existing_or_refresh_token(
                     &client,
@@ -197,12 +198,12 @@ impl Bot {
                     "[{}] {}: {}",
                     timestamp, payload.chatter_user_name, payload.message.text
                 );
-                if let Some(command) = payload.message.text.strip_prefix("!") {
-                    let mut split_whitespace = command.split_whitespace();
+                if let Some(full_command) = payload.message.text.strip_prefix("!") {
+                    let mut split_whitespace = full_command.split_whitespace();
                     let command = split_whitespace.next().unwrap();
-                    let rest = split_whitespace.next().map(|opt| opt.to_string());
+                    let rest = full_command.replace(command, "");
 
-                    self.command(&payload, &subscription, command, rest, &token)
+                    self.command(&payload, &subscription, command, rest.trim(), &token)
                         .await?;
                 }
             }
@@ -235,7 +236,7 @@ impl Bot {
             eventsub::channel::ChannelChatMessageV1,
         >,
         command: &str,
-        _rest: Option<String>,
+        _rest: &str,
         token: &UserToken,
     ) -> Result<(), eyre::Report> {
         tracing::info!("Command: {}", command);
@@ -255,7 +256,7 @@ impl Bot {
             username: payload.chatter_user_login.to_string(),
             is_moderator,
             auth: Some(self.config.comms_key.clone()),
-            args: _rest,
+            args: _rest.to_string(),
             source: "byond-twitch".to_string(),
         })
         .unwrap();
@@ -300,7 +301,7 @@ impl Bot {
 struct GameRequest {
     query: String,
     command: String,
-    args: Option<String>,
+    args: String,
     username: String,
     is_moderator: bool,
     auth: Option<String>,

@@ -1,0 +1,22 @@
+[package]
+name = "byond-twitch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+twitch_api = { version = "0.7.0", features = ["eventsub", "helix", "reqwest"] }
+clap = { version = "4.5.26", features = ["derive", "env"] }
+dotenvy = "0.15.7"
+color-eyre = "0.6.3"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+toml = "0.8.19"
+serde = "1.0.217"
+serde_derive = "1.0.217"
+tokio = { version = "1.43.0", features = ["macros", "rt-multi-thread"] }
+tokio-tungstenite = { version = "0.26.1", features = ["native-tls", "url"] }
+reqwest = "0.12.12"
+eyre = "0.6.12"
+futures = "0.3.31"
+http2byond = "0.2.0"
+serde_json = "1.0.145"

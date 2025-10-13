@@ -273,18 +273,19 @@ impl Bot {
                 ByondTopicValue::Number(_) => return Ok(()),
                 ByondTopicValue::String(mut string) => {
                     string.pop();
-                    let response: GameResponse = serde_json::from_str(&string).unwrap();
 
-                    let _ = self
-                        .client
-                        .send_chat_message_reply(
-                            &subscription.condition.broadcaster_user_id,
-                            &subscription.condition.user_id,
-                            &payload.message_id,
-                            &*response.response,
-                            token,
-                        )
-                        .await;
+                    if let Ok(response) = serde_json::from_str::<GameResponse>(&string) {
+                        let _ = self
+                            .client
+                            .send_chat_message_reply(
+                                &subscription.condition.broadcaster_user_id,
+                                &subscription.condition.user_id,
+                                &payload.message_id,
+                                &*response.response,
+                                token,
+                            )
+                            .await;
+                    }
                 }
             }
         }

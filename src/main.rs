@@ -222,19 +222,12 @@ impl Bot {
                             ..Default::default()
                         };
 
-                        match request_client
+                        let _ = request_client
                             .request(Method::POST, &webhook)
                             .body(serde_json::to_string(&outbound_webhook).unwrap())
                             .header("Content-Type", "application/json")
                             .send()
-                            .await
-                        {
-                            Ok(res) => eprintln!("Response: {:?}", res.text().await),
-                            Err(err) => {
-                                eprintln!("Response error: {:?}", err);
-                                return;
-                            }
-                        }
+                            .await;
 
                         let published_path = &persist.join("published.txt");
                         if fs::exists(published_path).unwrap() {

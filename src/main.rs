@@ -1,8 +1,8 @@
 pub mod websocket;
 
 use std::fs;
-use std::io::Write;
 use std::net::ToSocketAddrs;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -13,6 +13,7 @@ use reqwest::{Client, Method};
 use tokio::sync::Mutex;
 use twitch_api::helix;
 use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
+use twitch_api::types::Timestamp;
 use twitch_api::{
     client::ClientDefault,
     eventsub::{self, Event, Message, Payload},
@@ -180,71 +181,7 @@ pub struct Bot {
 
 impl Bot {
     pub async fn start(&self) -> Result<(), eyre::Report> {
-        {
-            let broadcaster = self.broadcaster.clone();
-            let inner_client = self.client.clone();
-            let app_token = self.app_token.clone();
-            let published_clips = self.published_clips.clone();
-            let webhook = self.config.discord_webhook.clone();
-            let persist = self.opts.persist.clone();
-            tokio::spawn(async move {
-                let Some(webhook) = webhook else {
-                    return;
-                };
-
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-                loop {
-                    interval.tick().await;
-
-                    let token_guard = app_token.lock().await;
-
-                    let request = helix::clips::GetClipsRequest::broadcaster_id(&broadcaster);
-                    let Ok(responses) = inner_client.req_get(request, &*token_guard).await else {
-                        continue;
-                    };
-
-                    let mut published_clips = published_clips.lock().await;
-
-                    let request_client = reqwest::Client::new();
-                    let mut wait_interval =
-                        tokio::time::interval(tokio::time::Duration::from_secs(1));
-
-                    for response in responses.data {
-                        if published_clips.contains(&response.id) {
-                            continue;
-                        }
-
-                        wait_interval.tick().await;
-
-                        let outbound_webhook = Webhook {
-                            username: Some("twitch.tv/cm_ss13".to_string()),
-                            content: Some(response.url),
-                            ..Default::default()
-                        };
-
-                        let _ = request_client
-                            .request(Method::POST, &webhook)
-                            .body(serde_json::to_string(&outbound_webhook).unwrap())
-                            .header("Content-Type", "application/json")
-                            .send()
-                            .await;
-
-                        let published_path = &persist.join("published.txt");
-                        if fs::exists(published_path).unwrap() {
-                            let mut writer = fs::OpenOptions::new()
-                                .append(true)
-                                .open(published_path)
-                                .unwrap();
-
-                            let _ = write!(writer, "|{}", response.id);
-                        } else {
-                            let _ = fs::write(published_path, &response.id);
-                        }
-                        published_clips.push(response.id);
-                    }
-                }
-            });
-        }
+        let _ = self.start_clip_polling();
 
         // To make a connection to the chat we need to use a websocket connection.
         // This is a wrapper for the websocket connection that handles the reconnects and handles all messages from eventsub.
@@ -280,6 +217,82 @@ impl Bot {
         };
         let ws = websocket.run(|e, ts| async { self.handle_event(e, ts).await });
         futures::future::try_join(ws, refresh_token).await?;
+        Ok(())
+    }
+
+    fn start_clip_polling(&self) -> Result<(), eyre::Report> {
+        let broadcaster = self.broadcaster.clone();
+        let inner_client = self.client.clone();
+        let app_token = self.app_token.clone();
+        let published_clips = self.published_clips.clone();
+        let webhook = self.config.discord_webhook.clone();
+        let persist = self.opts.persist.clone();
+        tokio::spawn(async move {
+            let Some(webhook) = webhook else {
+                return;
+            };
+
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+
+                let token_guard = app_token.lock().await;
+
+                let previous_day_rfc3339 = chrono::Utc::now()
+                    .date_naive()
+                    .pred_opt()
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+                let request = helix::clips::GetClipsRequest::broadcaster_id(&broadcaster)
+                    .started_at(Timestamp::from_str(&previous_day_rfc3339).unwrap())
+                    .to_owned();
+
+                let Ok(responses) = inner_client.req_get(request, &*token_guard).await else {
+                    continue;
+                };
+
+                let mut published_clips = published_clips.lock().await;
+
+                let request_client = reqwest::Client::new();
+                let mut wait_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+                let mut all_published: Vec<String> = Vec::new();
+                for response in responses.data {
+                    if published_clips.contains(&response.id) {
+                        all_published.push(response.id.clone());
+                        continue;
+                    }
+
+                    wait_interval.tick().await;
+
+                    let outbound_webhook = Webhook {
+                        username: Some("twitch.tv/cm_ss13".to_string()),
+                        content: Some(response.url),
+                        ..Default::default()
+                    };
+
+                    let _ = request_client
+                        .request(Method::POST, &webhook)
+                        .body(serde_json::to_string(&outbound_webhook).unwrap())
+                        .header("Content-Type", "application/json")
+                        .send()
+                        .await;
+
+                    all_published.push(response.id);
+                }
+                published_clips.clear();
+                for clip in all_published {
+                    published_clips.push(clip);
+                }
+
+                let _ = fs::write(persist.join("published.txt"), published_clips.join("|"));
+            }
+        });
+
         Ok(())
     }
 

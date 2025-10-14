@@ -276,40 +276,30 @@ impl Bot {
             auth: Some(self.config.comms_key.clone()),
             args: _rest.to_string(),
             source: "byond-twitch".to_string(),
-        })
-        .unwrap();
+        })?;
 
-        if let Ok(sent) = http2byond::send_byond(
-            &self
-                .config
-                .byond_host
-                .to_socket_addrs()
-                .unwrap()
-                .next()
-                .unwrap(),
+        let ByondTopicValue::String(mut received) = http2byond::send_byond(
+            &self.config.byond_host.to_socket_addrs()?.next().unwrap(),
             &json,
-        ) {
-            match sent {
-                ByondTopicValue::None => return Ok(()),
-                ByondTopicValue::Number(_) => return Ok(()),
-                ByondTopicValue::String(mut string) => {
-                    string.pop();
+        )?
+        else {
+            return Ok(());
+        };
 
-                    if let Ok(response) = serde_json::from_str::<GameResponse>(&string) {
-                        let _ = self
-                            .client
-                            .send_chat_message_reply(
-                                &subscription.condition.broadcaster_user_id,
-                                &subscription.condition.user_id,
-                                &payload.message_id,
-                                &*response.response,
-                                token,
-                            )
-                            .await;
-                    }
-                }
-            }
-        }
+        received.pop();
+
+        let response = serde_json::from_str::<GameResponse>(&received)?;
+
+        let _ = self
+            .client
+            .send_chat_message_reply(
+                &subscription.condition.broadcaster_user_id,
+                &subscription.condition.user_id,
+                &payload.message_id,
+                &*response.response,
+                token,
+            )
+            .await;
 
         Ok(())
     }

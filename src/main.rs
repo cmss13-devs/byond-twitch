@@ -6,8 +6,10 @@ use std::sync::Arc;
 use clap::Parser;
 use eyre::WrapErr as _;
 use http2byond::ByondTopicValue;
+use reqwest::redirect::Policy;
+use reqwest::Client;
 use tokio::sync::Mutex;
-use twitch_api::twitch_oauth2::{self, Scope, TwitchToken as _, UserToken};
+use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
 use twitch_api::{
     client::ClientDefault,
     eventsub::{self, Event, Message, Payload},
@@ -20,6 +22,9 @@ pub struct Cli {
     /// Client ID of twitch application
     #[clap(long, env, hide_env = true)]
     pub client_id: twitch_api::twitch_oauth2::ClientId,
+    /// Client secret of twitch application
+    #[clap(long, env, hide_env = true)]
+    pub client_secret: twitch_api::twitch_oauth2::ClientSecret,
     #[clap(long, env, hide_env = true)]
     pub broadcaster_login: twitch_api::types::UserName,
     /// Path to config file
@@ -59,7 +64,7 @@ async fn main() -> Result<(), eyre::Report> {
 
     let token_path = &opts.persist;
 
-    let mut token: Option<UserToken> = None;
+    let mut user_token: Option<UserToken> = None;
 
     if let Ok(exists) = std::fs::exists(token_path) {
         if exists {
@@ -71,50 +76,59 @@ async fn main() -> Result<(), eyre::Report> {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?;
 
-            token = Some(
+            user_token = Some(
                 twitch_oauth2::UserToken::from_existing_or_refresh_token(
                     &client,
                     tokens[0].into(),
                     tokens[1].into(),
                     opts.client_id.clone(),
-                    None,
+                    Some(opts.client_secret.clone()),
                 )
                 .await?,
             );
         }
     }
 
-    if token.is_none() {
+    if user_token.is_none() {
         let mut builder = twitch_api::twitch_oauth2::tokens::DeviceUserTokenBuilder::new(
             opts.client_id.clone(),
             vec![Scope::UserReadChat, Scope::UserWriteChat],
         );
+        builder.set_secret(Some(opts.client_secret.clone()));
         let code = builder.start(&client).await?;
         println!("Please go to: {}", code.verification_uri);
-        token = Some(builder.wait_for_code(&client, tokio::time::sleep).await?);
+        user_token = Some(builder.wait_for_code(&client, tokio::time::sleep).await?);
     }
 
-    if token.is_none() {
+    if user_token.is_none() {
         return Ok(());
     }
 
-    let token = token.unwrap();
+    let user_token = user_token.unwrap();
 
-    if let Some(refresh_token) = &token.refresh_token {
+    if let Some(refresh_token) = &user_token.refresh_token {
         let _ = std::fs::write(
             token_path,
             format!(
                 "{}|{}",
-                token.access_token.clone().take(),
+                user_token.access_token.clone().take(),
                 refresh_token.clone().take()
             ),
         );
     }
 
+    let app_token = AppAccessToken::get_app_access_token(
+        &Client::builder().redirect(Policy::none()).build()?,
+        opts.client_id.clone(),
+        opts.client_secret.clone(),
+        vec![Scope::UserWriteChat, Scope::UserBot, Scope::ChannelBot],
+    )
+    .await?;
+
     let Some(twitch_api::helix::users::User {
         id: broadcaster, ..
     }) = client
-        .get_user_from_login(&opts.broadcaster_login, &token)
+        .get_user_from_login(&opts.broadcaster_login, &user_token)
         .await?
     else {
         eyre::bail!(
@@ -122,12 +136,15 @@ async fn main() -> Result<(), eyre::Report> {
             opts.broadcaster_login
         );
     };
-    let token = Arc::new(Mutex::new(token));
+
+    let user_token = Arc::new(Mutex::new(user_token));
+    let app_token = Arc::new(Mutex::new(app_token));
 
     let bot = Bot {
         opts,
         client,
-        token,
+        user_token,
+        app_token,
         config,
         broadcaster,
     };
@@ -138,7 +155,8 @@ async fn main() -> Result<(), eyre::Report> {
 pub struct Bot {
     pub opts: Cli,
     pub client: HelixClient<'static, reqwest::Client>,
-    pub token: Arc<Mutex<twitch_api::twitch_oauth2::UserToken>>,
+    pub user_token: Arc<Mutex<twitch_api::twitch_oauth2::UserToken>>,
+    pub app_token: Arc<Mutex<twitch_api::twitch_oauth2::AppAccessToken>>,
     pub config: Config,
     pub broadcaster: twitch_api::types::UserId,
 }
@@ -149,13 +167,13 @@ impl Bot {
         // This is a wrapper for the websocket connection that handles the reconnects and handles all messages from eventsub.
         let websocket = websocket::ChatWebsocketClient {
             session_id: None,
-            token: self.token.clone(),
+            token: self.user_token.clone(),
             client: self.client.clone(),
             connect_url: twitch_api::TWITCH_EVENTSUB_WEBSOCKET_URL.clone(),
             chats: vec![self.broadcaster.clone()],
         };
         let refresh_token = async move {
-            let token = self.token.clone();
+            let token = self.user_token.clone();
             let client = self.client.clone();
             // We check constantly if the token is valid.
             // We also need to refresh the token if it's about to be expired.
@@ -187,7 +205,7 @@ impl Bot {
         event: Event,
         timestamp: twitch_api::types::Timestamp,
     ) -> Result<(), eyre::Report> {
-        let token = self.token.lock().await;
+        let token = self.app_token.lock().await;
         match event {
             Event::ChannelChatMessageV1(Payload {
                 message: Message::Notification(payload),
@@ -237,7 +255,7 @@ impl Bot {
         >,
         command: &str,
         _rest: &str,
-        token: &UserToken,
+        token: &AppAccessToken,
     ) -> Result<(), eyre::Report> {
         tracing::info!("Command: {}", command);
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-twitch_api = { version = "0.7.0", features = ["eventsub", "helix", "reqwest"] }
+twitch_api = { version = "0.7.0", features = ["eventsub", "helix", "reqwest", "client"] }
 clap = { version = "4.5.26", features = ["derive", "env"] }
 dotenvy = "0.15.7"
 color-eyre = "0.6.3"

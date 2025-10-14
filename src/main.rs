@@ -1,5 +1,7 @@
 pub mod websocket;
 
+use std::fs;
+use std::io::Write;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
@@ -7,8 +9,9 @@ use clap::Parser;
 use eyre::WrapErr as _;
 use http2byond::ByondTopicValue;
 use reqwest::redirect::Policy;
-use reqwest::Client;
+use reqwest::{Client, Method};
 use tokio::sync::Mutex;
+use twitch_api::helix;
 use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
 use twitch_api::{
     client::ClientDefault,
@@ -31,7 +34,7 @@ pub struct Cli {
     #[clap(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/config.toml"))]
     pub config: std::path::PathBuf,
     /// Path to persistence file
-    #[clap(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/persist/token.txt"))]
+    #[clap(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/persist"))]
     pub persist: std::path::PathBuf,
 }
 
@@ -39,6 +42,7 @@ pub struct Cli {
 pub struct Config {
     byond_host: String,
     comms_key: String,
+    discord_webhook: Option<String>,
 }
 
 impl Config {
@@ -62,7 +66,7 @@ async fn main() -> Result<(), eyre::Report> {
         ClientDefault::default_client_with_name(Some("my_chatbot".parse()?))?,
     );
 
-    let token_path = &opts.persist;
+    let token_path = &opts.persist.join("token.txt");
 
     let mut user_token: Option<UserToken> = None;
 
@@ -137,14 +141,26 @@ async fn main() -> Result<(), eyre::Report> {
         );
     };
 
+    let mut published_clips: Vec<String> = Vec::new();
+
+    let published_path = &opts.persist.join("published.txt");
+    if fs::exists(published_path)? {
+        let read = fs::read_to_string(published_path)?;
+
+        published_clips = read.split("|").map(|split| split.to_string()).collect();
+    }
+
     let user_token = Arc::new(Mutex::new(user_token));
     let app_token = Arc::new(Mutex::new(app_token));
+
+    let published_clips = Arc::new(Mutex::new(published_clips));
 
     let bot = Bot {
         opts,
         client,
         user_token,
         app_token,
+        published_clips,
         config,
         broadcaster,
     };
@@ -157,12 +173,86 @@ pub struct Bot {
     pub client: HelixClient<'static, reqwest::Client>,
     pub user_token: Arc<Mutex<twitch_api::twitch_oauth2::UserToken>>,
     pub app_token: Arc<Mutex<twitch_api::twitch_oauth2::AppAccessToken>>,
+    pub published_clips: Arc<Mutex<Vec<String>>>,
     pub config: Config,
     pub broadcaster: twitch_api::types::UserId,
 }
 
 impl Bot {
     pub async fn start(&self) -> Result<(), eyre::Report> {
+        {
+            let broadcaster = self.broadcaster.clone();
+            let inner_client = self.client.clone();
+            let app_token = self.app_token.clone();
+            let published_clips = self.published_clips.clone();
+            let webhook = self.config.discord_webhook.clone();
+            let persist = self.opts.persist.clone();
+            tokio::spawn(async move {
+                let Some(webhook) = webhook else {
+                    return;
+                };
+
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+
+                    let token_guard = app_token.lock().await;
+
+                    let request = helix::clips::GetClipsRequest::broadcaster_id(&broadcaster);
+                    let Ok(responses) = inner_client.req_get(request, &*token_guard).await else {
+                        continue;
+                    };
+
+                    let mut published_clips = published_clips.lock().await;
+
+                    let request_client = reqwest::Client::new();
+                    let mut wait_interval =
+                        tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+                    for response in responses.data {
+                        if published_clips.contains(&response.id) {
+                            continue;
+                        }
+
+                        wait_interval.tick().await;
+
+                        let outbound_webhook = Webhook {
+                            username: Some("twitch.tv/cm_ss13".to_string()),
+                            content: Some(response.url),
+                            ..Default::default()
+                        };
+
+                        match request_client
+                            .request(Method::POST, &webhook)
+                            .body(serde_json::to_string(&outbound_webhook).unwrap())
+                            .header("Content-Type", "application/json")
+                            .send()
+                            .await
+                        {
+                            Ok(res) => eprintln!("Response: {:?}", res.text().await),
+                            Err(err) => {
+                                eprintln!("Response error: {:?}", err);
+                                return;
+                            }
+                        }
+
+                        let published_path = &persist.join("published.txt");
+                        if fs::exists(published_path).unwrap() {
+                            let mut writer = fs::OpenOptions::new()
+                                .append(true)
+                                .open(published_path)
+                                .unwrap();
+
+                            let _ = write!(writer, "|{}", response.id);
+                        } else {
+                            let _ = fs::write(published_path, &response.id);
+                        }
+                        published_clips.push(response.id);
+                    }
+                }
+            });
+        }
+
         // To make a connection to the chat we need to use a websocket connection.
         // This is a wrapper for the websocket connection that handles the reconnects and handles all messages from eventsub.
         let websocket = websocket::ChatWebsocketClient {
@@ -321,4 +411,41 @@ struct GameResponse {
     #[allow(dead_code)]
     statuscode: i32,
     response: String,
+}
+
+#[derive(serde::Serialize, Default)]
+struct Webhook {
+    content: Option<String>,
+    username: Option<String>,
+    avatar_url: Option<String>,
+    embeds: Option<Vec<WebhookEmbed>>,
+}
+
+#[derive(serde::Serialize, Default)]
+struct WebhookEmbed {
+    title: String,
+    #[serde(rename = "type")]
+    _type: String,
+    description: String,
+    url: String,
+    timestamp: String,
+    color: i32,
+    video: Option<WebhookVideo>,
+    author: Option<WebhookAuthor>,
+    footer: Option<WebhookFooter>,
+}
+
+#[derive(serde::Serialize, Default)]
+struct WebhookVideo {
+    url: String,
+}
+
+#[derive(serde::Serialize)]
+struct WebhookAuthor {
+    name: String,
+}
+
+#[derive(serde::Serialize)]
+struct WebhookFooter {
+    text: String,
 }

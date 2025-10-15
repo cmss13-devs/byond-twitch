@@ -271,7 +271,10 @@ impl Bot {
 
                     let outbound_webhook = Webhook {
                         username: Some("twitch.tv/cm_ss13".to_string()),
-                        content: Some(response.url),
+                        content: Some(format!(
+                            "## New clip by {}\n\n{}",
+                            response.creator_name, response.url
+                        )),
                         ..Default::default()
                     };
 

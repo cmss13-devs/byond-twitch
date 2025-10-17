@@ -1,7 +1,8 @@
+pub mod server;
 pub mod websocket;
 
 use std::fs;
-use std::net::ToSocketAddrs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -10,7 +11,7 @@ use eyre::WrapErr as _;
 use http2byond::ByondTopicValue;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, mpsc, Mutex};
 use twitch_api::helix;
 use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
 use twitch_api::types::Timestamp;
@@ -44,6 +45,7 @@ pub struct Config {
     byond_host: String,
     comms_key: String,
     discord_webhook: Option<String>,
+    redis_url: Option<String>,
 }
 
 impl Config {
@@ -62,6 +64,10 @@ async fn main() -> Result<(), eyre::Report> {
     _ = dotenvy::dotenv();
     let opts = Cli::parse();
     let config = Config::load(&opts.config)?;
+
+    if let Some(redis_url) = config.redis_url.clone() {
+        let _ = start_redis_websocket(redis_url).await;
+    }
 
     let client: HelixClient<reqwest::Client> = twitch_api::HelixClient::with_client(
         ClientDefault::default_client_with_name(Some("my_chatbot".parse()?))?,
@@ -166,6 +172,41 @@ async fn main() -> Result<(), eyre::Report> {
         broadcaster,
     };
     bot.start().await?;
+    Ok(())
+}
+
+async fn start_redis_websocket(redis_url: String) -> Result<(), eyre::Report> {
+    let (tx, _) = broadcast::channel::<String>(100);
+
+    let socket_tx = tx.clone();
+    tokio::spawn(async move {
+        let socket_server = server::WebsocketServer::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+            socket_tx,
+        );
+        let _ = socket_server.run().await;
+    });
+
+    let redis_url = redis_url.clone();
+
+    tokio::spawn(async move {
+        let redis_client = redis::Client::open(redis_url).unwrap();
+
+        let mut conn = redis_client.get_connection().unwrap();
+        let mut pub_sub = conn.as_pubsub();
+
+        pub_sub.subscribe(&["cmtv.round", "cmtv.started"]).unwrap();
+
+        loop {
+            let msg = pub_sub.get_message().unwrap();
+            let _ = tx.send(format!(
+                "{}:{}",
+                msg.get_channel_name(),
+                msg.get_payload::<String>().unwrap()
+            ));
+        }
+    });
+
     Ok(())
 }
 

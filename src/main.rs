@@ -1,20 +1,25 @@
 pub mod server;
 pub mod websocket;
 
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::{borrow, fs};
 
 use clap::Parser;
 use eyre::WrapErr as _;
 use http2byond::ByondTopicValue;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
+use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc, Mutex};
-use twitch_api::helix;
+use twitch_api::helix::predictions::create_prediction::{
+    self, CreatePredictionRequest, NewPredictionOutcome,
+};
+use twitch_api::helix::predictions::{end_prediction, get_predictions};
+use twitch_api::helix::{self, Request};
 use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
-use twitch_api::types::Timestamp;
+use twitch_api::types::{PredictionOutcome, PredictionStatus, Timestamp};
 use twitch_api::{
     client::ClientDefault,
     eventsub::{self, Event, Message, Payload},
@@ -64,10 +69,6 @@ async fn main() -> Result<(), eyre::Report> {
     _ = dotenvy::dotenv();
     let opts = Cli::parse();
     let config = Config::load(&opts.config)?;
-
-    if let Some(redis_url) = config.redis_url.clone() {
-        let _ = start_redis_websocket(redis_url).await;
-    }
 
     let client: HelixClient<reqwest::Client> = twitch_api::HelixClient::with_client(
         ClientDefault::default_client_with_name(Some("my_chatbot".parse()?))?,
@@ -175,39 +176,16 @@ async fn main() -> Result<(), eyre::Report> {
     Ok(())
 }
 
-async fn start_redis_websocket(redis_url: String) -> Result<(), eyre::Report> {
-    let (tx, _) = broadcast::channel::<String>(100);
+#[derive(Deserialize)]
+struct RedisRoundStart {
+    source: String,
+    round_id: i32,
 
-    let socket_tx = tx.clone();
-    tokio::spawn(async move {
-        let socket_server = server::WebsocketServer::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
-            socket_tx,
-        );
-        let _ = socket_server.run().await;
-    });
+    #[serde(rename = "type")]
+    _type: String,
 
-    let redis_url = redis_url.clone();
-
-    tokio::spawn(async move {
-        let redis_client = redis::Client::open(redis_url).unwrap();
-
-        let mut conn = redis_client.get_connection().unwrap();
-        let mut pub_sub = conn.as_pubsub();
-
-        pub_sub.subscribe(&["cmtv.round", "cmtv.started"]).unwrap();
-
-        loop {
-            let msg = pub_sub.get_message().unwrap();
-            let _ = tx.send(format!(
-                "{}:{}",
-                msg.get_channel_name(),
-                msg.get_payload::<String>().unwrap()
-            ));
-        }
-    });
-
-    Ok(())
+    round_name: Option<String>,
+    round_finished: Option<String>,
 }
 
 pub struct Bot {
@@ -223,6 +201,10 @@ pub struct Bot {
 impl Bot {
     pub async fn start(&self) -> Result<(), eyre::Report> {
         let _ = self.start_clip_polling();
+
+        if let Some(redis_url) = self.config.redis_url.clone() {
+            let _ = self.start_redis_websocket(redis_url);
+        }
 
         // To make a connection to the chat we need to use a websocket connection.
         // This is a wrapper for the websocket connection that handles the reconnects and handles all messages from eventsub.
@@ -334,6 +316,167 @@ impl Bot {
                 }
 
                 let _ = fs::write(persist.join("published.txt"), published_clips.join("|"));
+            }
+        });
+
+        Ok(())
+    }
+
+    fn start_redis_websocket(&self, redis_url: String) -> Result<(), eyre::Report> {
+        let (tx, _) = broadcast::channel::<String>(100);
+
+        let socket_tx = tx.clone();
+        tokio::spawn(async move {
+            let socket_server = server::WebsocketServer::new(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+                socket_tx,
+            );
+            let _ = socket_server.run().await;
+        });
+
+        let redis_url = redis_url.clone();
+
+        let broadcaster_id = self.broadcaster.clone();
+        let inner_client = self.client.clone();
+        let token = self.user_token.clone();
+        tokio::spawn(async move {
+            let redis_client = redis::Client::open(redis_url).unwrap();
+
+            let mut conn = redis_client.get_connection().unwrap();
+            let mut pub_sub = conn.as_pubsub();
+
+            pub_sub.subscribe(&["byond.round"]).unwrap();
+
+            loop {
+                let msg = pub_sub.get_message().unwrap();
+
+                let Ok(unwrapped) = msg.get_payload::<String>() else {
+                    continue;
+                };
+
+                let Ok(deserialized) = serde_json::from_str::<RedisRoundStart>(&unwrapped) else {
+                    continue;
+                };
+
+                if deserialized.source != "cm13-live" {
+                    continue;
+                }
+
+                match deserialized._type.as_str() {
+                    "round-start" => {
+                        let token = token.lock().await;
+
+                        let request =
+                            get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
+                        let existing_response: Vec<get_predictions::Prediction> =
+                            inner_client.req_get(request, &*token).await.unwrap().data;
+
+                        if let Some(existing) = existing_response.first() {
+                            if existing.status == PredictionStatus::Active
+                                || existing.status == PredictionStatus::Locked
+                            {
+                                let request = end_prediction::EndPredictionRequest::new();
+                                let body = end_prediction::EndPredictionBody::new(
+                                    &broadcaster_id,
+                                    &existing.id,
+                                    PredictionStatus::Canceled,
+                                );
+
+                                let _ = inner_client.req_patch(request, body, &*token).await;
+                            }
+                        }
+
+                        let outcomes = vec![
+                            NewPredictionOutcome::new("Marines"),
+                            NewPredictionOutcome::new("Xenos"),
+                        ];
+                        let body = create_prediction::CreatePredictionBody::new(
+                            &broadcaster_id,
+                            format!("Who will win Round {}?", &deserialized.round_id),
+                            &outcomes,
+                            1200,
+                        );
+
+                        let request = create_prediction::CreatePredictionRequest::new();
+
+                        let _ = inner_client.req_post(request, body, &*token).await;
+                        let _ = inner_client
+                            .send_chat_message(
+                                &broadcaster_id,
+                                &token.user_id,
+                                "New round beginning! Vote on the outcome for the next 20 minutes.",
+                                &*token,
+                            )
+                            .await;
+                    }
+                    "round-complete" => {
+                        let token = token.lock().await;
+
+                        let request =
+                            get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
+
+                        let existing_response: Vec<get_predictions::Prediction> =
+                            inner_client.req_get(request, &*token).await.unwrap().data;
+
+                        let Some(first_response) = existing_response.first() else {
+                            continue;
+                        };
+
+                        if !&first_response
+                            .title
+                            .contains(&deserialized.round_id.to_string())
+                        {
+                            continue;
+                        }
+
+                        let Some(outcome) = deserialized.round_finished else {
+                            continue;
+                        };
+
+                        let search_string = if outcome.contains("Xenomorph") {
+                            "Xenos"
+                        } else if outcome.contains("Marine") {
+                            "Marines"
+                        } else {
+                            let request = end_prediction::EndPredictionRequest::new();
+                            let body = end_prediction::EndPredictionBody::new(
+                                &broadcaster_id,
+                                &first_response.id,
+                                PredictionStatus::Canceled,
+                            );
+
+                            let _ = inner_client.req_patch(request, body, &*token).await;
+                            continue;
+                        };
+
+                        for prediction in &first_response.outcomes {
+                            if prediction.title != search_string {
+                                continue;
+                            }
+
+                            let request = end_prediction::EndPredictionRequest::new();
+                            let body = end_prediction::EndPredictionBody::new(
+                                &broadcaster_id,
+                                &first_response.id,
+                                PredictionStatus::Resolved,
+                            )
+                            .winning_outcome_id(&prediction.id);
+
+                            let _ = inner_client.req_patch(request, body, &*token).await;
+                            let _ = inner_client
+                                .send_chat_message(
+                                    &broadcaster_id,
+                                    &token.user_id,
+                                    &*format!("Round finished! The result was {}.", outcome),
+                                    &*token,
+                                )
+                                .await;
+
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
             }
         });
 

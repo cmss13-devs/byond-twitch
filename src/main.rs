@@ -1,6 +1,8 @@
 pub mod server;
 pub mod websocket;
 
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
@@ -9,8 +11,15 @@ use std::sync::Arc;
 use clap::Parser;
 use eyre::WrapErr as _;
 use http2byond::ByondTopicValue;
+use http_body_util::Full;
+use hyper::body::Bytes;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use twitch_api::helix;
 use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
@@ -68,6 +77,14 @@ async fn main() -> Result<(), eyre::Report> {
     if let Some(redis_url) = config.redis_url.clone() {
         let _ = start_redis_websocket(redis_url).await;
     }
+
+    let byond_host = config.byond_host.clone();
+    let comms_key = config.comms_key.clone();
+    // tokio::spawn(async move {
+    let _ = start_webserver(byond_host, comms_key).await;
+    // });
+
+    return Ok(());
 
     let client: HelixClient<reqwest::Client> = twitch_api::HelixClient::with_client(
         ClientDefault::default_client_with_name(Some("my_chatbot".parse()?))?,
@@ -208,6 +225,114 @@ async fn start_redis_websocket(redis_url: String) -> Result<(), eyre::Report> {
     });
 
     Ok(())
+}
+
+async fn start_webserver(byond_host: String, comms_key: String) -> Result<(), eyre::Report> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+
+    let listener = TcpListener::bind(addr).await?;
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+
+        let io = TokioIo::new(stream);
+
+        let byond_host = byond_host.clone();
+        let comms_key = comms_key.clone();
+        tokio::task::spawn(async move {
+            if let Err(err) = http1::Builder::new()
+                .serve_connection(
+                    io,
+                    service_fn(move |req| {
+                        handle_request(req, byond_host.to_owned(), comms_key.to_owned())
+                    }),
+                )
+                .await
+            {
+                eprintln!("Error serving connection: {:?}", err);
+            }
+        });
+    }
+}
+
+async fn handle_request(
+    request: Request<hyper::body::Incoming>,
+    byond_host: String,
+    comms_key: String,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    match request.uri().path() {
+        "/role_icons" => {
+            let Ok(query) = serde_json::to_string(&GameRequest {
+                query: "role_icons".to_string(),
+                auth: Some(comms_key),
+                source: "byond-twitch-web".to_string(),
+            }) else {
+                return get_response_with_code("An error occured preparing to fetch data!", 501);
+            };
+
+            /*
+            let Ok(mut received) = http2byond::send_byond(
+                &byond_host.to_socket_addrs().unwrap().next().unwrap(),
+                &query,
+            ) else {
+                return get_response_with_code("An error occured fetching data!", 501);
+            };
+            */
+
+            let mut received = match http2byond::send_byond(
+                &byond_host.to_socket_addrs().unwrap().next().unwrap(),
+                &query,
+            ) {
+                Ok(ByondTopicValue::String(ok)) => ok,
+                Ok(ByondTopicValue::Number(num)) => panic!("{:?}", num),
+                Ok(ByondTopicValue::None) => panic!("No data"),
+                Err(err) => panic!("{:?}", err),
+            };
+
+            received.pop();
+
+            let Ok(response) = serde_json::from_str::<GameResponse>(&received) else {
+                return get_response_with_code("An error occured deserializing data!", 501);
+            };
+
+            /*
+            let response = match serde_json::from_str::<GameResponse>(&received) {
+                Ok(res) => res,
+                Err(err) => panic!("{:?}", err),
+            };
+            */
+
+            let Some(GameResponseData::RoleIcons(icons)) = response.data else {
+                return get_response_with_code(&response.response, 200);
+            };
+
+            let Ok(response) = Response::builder()
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(
+                    serde_json::to_string(&icons).unwrap(),
+                )))
+            else {
+                return get_response_with_code("An error occured while preparing data!", 501);
+            };
+
+            return Ok(response);
+        }
+        "/active_players" => {}
+        _ => {}
+    }
+    Ok(Response::new(Full::new(Bytes::from("Hello, World!"))))
+}
+
+fn get_response_with_code(
+    what_to_say: &str,
+    code: u16,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    let response = Response::builder()
+        .status(code)
+        .body(Full::new(Bytes::from(what_to_say.to_string())))
+        .unwrap();
+
+    Ok(response)
 }
 
 pub struct Bot {
@@ -408,7 +533,7 @@ impl Bot {
             }
         }
 
-        let json = serde_json::to_string(&GameRequest {
+        let json = serde_json::to_string(&GameCMTVCommand {
             query: "cmtv".to_string(),
             command: command.to_string(),
             username: payload.chatter_user_login.to_string(),
@@ -448,19 +573,33 @@ impl Bot {
 #[derive(serde::Serialize)]
 struct GameRequest {
     query: String,
+    auth: Option<String>,
+    source: String,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct GameResponse {
+    statuscode: i32,
+    response: String,
+    data: Option<GameResponseData>,
+}
+
+#[derive(serde::Deserialize)]
+enum GameResponseData {
+    RoleIcons(HashMap<String, String>),
+    CharacterNames(Vec<String>),
+}
+
+#[derive(serde::Serialize)]
+struct GameCMTVCommand {
+    query: String,
     command: String,
     args: String,
     username: String,
     is_moderator: bool,
     auth: Option<String>,
     source: String,
-}
-
-#[derive(serde::Deserialize)]
-struct GameResponse {
-    #[allow(dead_code)]
-    statuscode: i32,
-    response: String,
 }
 
 #[derive(serde::Serialize, Default)]

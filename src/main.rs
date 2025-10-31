@@ -661,9 +661,9 @@ impl Bot {
                     continue;
                 };
 
-                let Ok(deserialized) = serde_json::from_str::<RedisRoundStart>(&unwrapped) else {
-                    tracing::info!("could not deserialise");
-                    continue;
+                let deserialized = match serde_json::from_str::<RedisRoundStart>(&unwrapped) {
+                    Ok(ok) => ok,
+                    Err(err) => panic!("{}", err),
                 };
 
                 if deserialized.source != "cm13-live" {

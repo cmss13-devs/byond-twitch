@@ -1,10 +1,10 @@
 pub mod server;
 pub mod websocket;
 
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::{borrow, fs};
 
 use clap::Parser;
 use eyre::WrapErr as _;
@@ -12,14 +12,12 @@ use http2byond::ByondTopicValue;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
 use serde::Deserialize;
-use tokio::sync::{broadcast, mpsc, Mutex};
-use twitch_api::helix::predictions::create_prediction::{
-    self, CreatePredictionRequest, NewPredictionOutcome,
-};
+use tokio::sync::{broadcast, Mutex};
+use twitch_api::helix::predictions::create_prediction::{self, NewPredictionOutcome};
 use twitch_api::helix::predictions::{end_prediction, get_predictions};
-use twitch_api::helix::{self, Request};
+use twitch_api::helix::{self};
 use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
-use twitch_api::types::{PredictionOutcome, PredictionStatus, Timestamp};
+use twitch_api::types::{PredictionStatus, Timestamp};
 use twitch_api::{
     client::ClientDefault,
     eventsub::{self, Event, Message, Payload},
@@ -76,7 +74,7 @@ async fn main() -> Result<(), eyre::Report> {
 
     let token_path = &opts.persist.join("token.txt");
 
-    let mut user_token: Option<UserToken> = None;
+    let mut broadcaster_user_token: Option<UserToken> = None;
 
     if let Ok(exists) = std::fs::exists(token_path) {
         if exists {
@@ -88,7 +86,7 @@ async fn main() -> Result<(), eyre::Report> {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?;
 
-            user_token = Some(
+            broadcaster_user_token = Some(
                 twitch_oauth2::UserToken::from_existing_or_refresh_token(
                     &client,
                     tokens[0].into(),
@@ -101,39 +99,35 @@ async fn main() -> Result<(), eyre::Report> {
         }
     }
 
-    if user_token.is_none() {
+    if broadcaster_user_token.is_none() {
         let mut builder = twitch_api::twitch_oauth2::tokens::DeviceUserTokenBuilder::new(
             opts.client_id.clone(),
-            vec![
-                Scope::UserReadChat,
-                Scope::UserWriteChat,
-                Scope::ChannelManagePredictions,
-            ],
+            vec![Scope::UserReadChat, Scope::ChannelManagePredictions],
         );
         builder.set_secret(Some(opts.client_secret.clone()));
         let code = builder.start(&client).await?;
         println!("Please go to: {}", code.verification_uri);
-        user_token = Some(builder.wait_for_code(&client, tokio::time::sleep).await?);
+        broadcaster_user_token = Some(builder.wait_for_code(&client, tokio::time::sleep).await?);
     }
 
-    if user_token.is_none() {
+    if broadcaster_user_token.is_none() {
         return Ok(());
     }
 
-    let user_token = user_token.unwrap();
+    let broadcaster_user_token = broadcaster_user_token.unwrap();
 
-    if let Some(refresh_token) = &user_token.refresh_token {
+    if let Some(refresh_token) = &broadcaster_user_token.refresh_token {
         let _ = std::fs::write(
             token_path,
             format!(
                 "{}|{}",
-                user_token.access_token.clone().take(),
+                broadcaster_user_token.access_token.clone().take(),
                 refresh_token.clone().take()
             ),
         );
     }
 
-    let app_token = AppAccessToken::get_app_access_token(
+    let bot_app_token = AppAccessToken::get_app_access_token(
         &Client::builder().redirect(Policy::none()).build()?,
         opts.client_id.clone(),
         opts.client_secret.clone(),
@@ -144,7 +138,7 @@ async fn main() -> Result<(), eyre::Report> {
     let Some(twitch_api::helix::users::User {
         id: broadcaster, ..
     }) = client
-        .get_user_from_login(&opts.broadcaster_login, &user_token)
+        .get_user_from_login(&opts.broadcaster_login, &broadcaster_user_token)
         .await?
     else {
         eyre::bail!(
@@ -162,16 +156,16 @@ async fn main() -> Result<(), eyre::Report> {
         published_clips = read.split("|").map(|split| split.to_string()).collect();
     }
 
-    let user_token = Arc::new(Mutex::new(user_token));
-    let app_token = Arc::new(Mutex::new(app_token));
+    let broadcaster_user_token = Arc::new(Mutex::new(broadcaster_user_token));
+    let bot_app_token = Arc::new(Mutex::new(bot_app_token));
 
     let published_clips = Arc::new(Mutex::new(published_clips));
 
     let bot = Bot {
         opts,
         client,
-        user_token,
-        app_token,
+        broadcaster_user_token,
+        bot_app_token,
         published_clips,
         config,
         broadcaster,
@@ -181,6 +175,7 @@ async fn main() -> Result<(), eyre::Report> {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct RedisRoundStart {
     source: String,
     round_id: i32,
@@ -195,8 +190,8 @@ struct RedisRoundStart {
 pub struct Bot {
     pub opts: Cli,
     pub client: HelixClient<'static, reqwest::Client>,
-    pub user_token: Arc<Mutex<twitch_api::twitch_oauth2::UserToken>>,
-    pub app_token: Arc<Mutex<twitch_api::twitch_oauth2::AppAccessToken>>,
+    pub broadcaster_user_token: Arc<Mutex<twitch_api::twitch_oauth2::UserToken>>,
+    pub bot_app_token: Arc<Mutex<twitch_api::twitch_oauth2::AppAccessToken>>,
     pub published_clips: Arc<Mutex<Vec<String>>>,
     pub config: Config,
     pub broadcaster: twitch_api::types::UserId,
@@ -214,13 +209,13 @@ impl Bot {
         // This is a wrapper for the websocket connection that handles the reconnects and handles all messages from eventsub.
         let websocket = websocket::ChatWebsocketClient {
             session_id: None,
-            token: self.user_token.clone(),
+            token: self.broadcaster_user_token.clone(),
             client: self.client.clone(),
             connect_url: twitch_api::TWITCH_EVENTSUB_WEBSOCKET_URL.clone(),
             chats: vec![self.broadcaster.clone()],
         };
         let refresh_token = async move {
-            let token = self.user_token.clone();
+            let token = self.broadcaster_user_token.clone();
             let client = self.client.clone();
             // We check constantly if the token is valid.
             // We also need to refresh the token if it's about to be expired.
@@ -250,7 +245,7 @@ impl Bot {
     fn start_clip_polling(&self) -> Result<(), eyre::Report> {
         let broadcaster = self.broadcaster.clone();
         let inner_client = self.client.clone();
-        let app_token = self.app_token.clone();
+        let app_token = self.bot_app_token.clone();
         let published_clips = self.published_clips.clone();
         let webhook = self.config.discord_webhook.clone();
         let persist = self.opts.persist.clone();
@@ -342,7 +337,7 @@ impl Bot {
 
         let broadcaster_id = self.broadcaster.clone();
         let inner_client = self.client.clone();
-        let token = self.user_token.clone();
+        let broadcaster_user_token = self.broadcaster_user_token.clone();
         tokio::spawn(async move {
             let redis_client = redis::Client::open(redis_url).unwrap();
 
@@ -368,12 +363,15 @@ impl Bot {
 
                 match deserialized._type.as_str() {
                     "round-start" => {
-                        let token = token.lock().await;
+                        let broadcaster_user_token = broadcaster_user_token.lock().await;
 
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
-                        let existing_response: Vec<get_predictions::Prediction> =
-                            inner_client.req_get(request, &*token).await.unwrap().data;
+                        let existing_response: Vec<get_predictions::Prediction> = inner_client
+                            .req_get(request, &*broadcaster_user_token)
+                            .await
+                            .unwrap()
+                            .data;
 
                         if let Some(existing) = existing_response.first() {
                             if existing.status == PredictionStatus::Active
@@ -386,7 +384,9 @@ impl Bot {
                                     PredictionStatus::Canceled,
                                 );
 
-                                let _ = inner_client.req_patch(request, body, &*token).await;
+                                let _ = inner_client
+                                    .req_patch(request, body, &*broadcaster_user_token)
+                                    .await;
                             }
                         }
 
@@ -403,18 +403,20 @@ impl Bot {
 
                         let request = create_prediction::CreatePredictionRequest::new();
 
-                        let _ = inner_client.req_post(request, body, &*token).await;
+                        let _ = inner_client
+                            .req_post(request, body, &*broadcaster_user_token)
+                            .await;
                         let _ = inner_client
                             .send_chat_message(
                                 &broadcaster_id,
-                                &token.user_id,
+                                &broadcaster_user_token.user_id,
                                 "New round beginning! Vote on the outcome for the next 20 minutes.",
-                                &*token,
+                                &*broadcaster_user_token,
                             )
                             .await;
                     }
                     "round-complete" => {
-                        let token = token.lock().await;
+                        let token = broadcaster_user_token.lock().await;
 
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
@@ -492,7 +494,7 @@ impl Bot {
         event: Event,
         timestamp: twitch_api::types::Timestamp,
     ) -> Result<(), eyre::Report> {
-        let token = self.app_token.lock().await;
+        let bot_app_token = self.bot_app_token.lock().await;
         match event {
             Event::ChannelChatMessageV1(Payload {
                 message: Message::Notification(payload),
@@ -508,8 +510,14 @@ impl Bot {
                     let command = split_whitespace.next().unwrap();
                     let rest = full_command.replace(command, "");
 
-                    self.command(&payload, &subscription, command, rest.trim(), &token)
-                        .await?;
+                    self.command(
+                        &payload,
+                        &subscription,
+                        command,
+                        rest.trim(),
+                        &bot_app_token,
+                    )
+                    .await?;
                 }
             }
             Event::ChannelChatNotificationV1(Payload {

@@ -207,7 +207,7 @@ async fn main() -> Result<(), eyre::Report> {
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[allow(dead_code)]
 struct RedisRoundStart {
     source: String,
@@ -619,16 +619,21 @@ impl Bot {
                 let msg = pub_sub.get_message().unwrap();
 
                 let Ok(unwrapped) = msg.get_payload::<String>() else {
+                    tracing::info!("non-string redis message");
                     continue;
                 };
 
                 let Ok(deserialized) = serde_json::from_str::<RedisRoundStart>(&unwrapped) else {
+                    tracing::info!("could not deserialise");
                     continue;
                 };
 
                 if deserialized.source != "cm13-live" {
+                    tracing::info!("non-primary source");
                     continue;
                 }
+
+                dbg!("{}", &deserialized);
 
                 match deserialized._type.as_str() {
                     "round-start" => {

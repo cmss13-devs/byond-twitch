@@ -17,7 +17,7 @@ use twitch_api::helix::predictions::create_prediction::{self, NewPredictionOutco
 use twitch_api::helix::predictions::{end_prediction, get_predictions};
 use twitch_api::helix::{self};
 use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
-use twitch_api::types::{PredictionStatus, Timestamp};
+use twitch_api::types::{PredictionStatus, Timestamp, UserId};
 use twitch_api::{
     client::ClientDefault,
     eventsub::{self, Event, Message, Payload},
@@ -596,7 +596,7 @@ impl Bot {
             .client
             .send_chat_message_reply(
                 &subscription.condition.broadcaster_user_id,
-                token.user_id().unwrap(),
+                UserId::from_static("1379066826"),
                 &payload.message_id,
                 &*response.response,
                 token,

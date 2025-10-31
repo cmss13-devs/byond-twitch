@@ -1,9 +1,10 @@
 pub mod server;
 pub mod websocket;
 
+use base64::Engine;
 use eyre::eyre;
 use hmac::{Hmac, Mac};
-use sha2::Sha384;
+use sha2::{Sha256, Sha384};
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::fs;
@@ -20,7 +21,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use jwt::VerifyWithKey;
+use jwt::{FromBase64, VerifyWithKey};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
@@ -378,9 +379,13 @@ async fn handle_request(
                 return get_response_with_code("Invalid request.", 503);
             };
 
-            let Ok(hmac): Result<Hmac<Sha384>, _> = Hmac::new_from_slice(twitch_secret.as_bytes())
-            else {
-                return get_response_with_code("Internal server error.", 500);
+            let Ok(hmac): Result<Hmac<Sha256>, _> = Hmac::new_from_slice(
+                base64::prelude::BASE64_STANDARD
+                    .decode(twitch_secret.as_bytes())
+                    .unwrap()
+                    .as_ref(),
+            ) else {
+                return get_response_with_code("Internal server errorer.", 500);
             };
 
             let Ok(claim): Result<TwitchExtToken, jwt::Error> =

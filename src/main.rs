@@ -419,7 +419,7 @@ async fn handle_request(
 
             get_response_with_code(&response.response, response.statuscode.try_into().unwrap())
         }
-        _ => get_response_with_code("Bad path.", 404),
+        _ => get_response_with_code("Bad path.", 200),
     }
 }
 

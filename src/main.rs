@@ -19,7 +19,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Mutex};
 use twitch_api::helix;
@@ -800,7 +800,13 @@ struct GameRequest {
 struct GameResponse {
     statuscode: i32,
     response: String,
-    data: Vec<String>,
+    data: Vec<Player>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Player {
+    name: String,
+    job: String,
 }
 
 #[derive(serde::Serialize)]

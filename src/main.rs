@@ -284,7 +284,7 @@ struct FollowPlayerRequest {
 struct TwitchExtToken {
     exp: i32,
     opaque_user_id: String,
-    user_id: String,
+    user_id: Option<String>,
     channel_id: String,
     role: String,
     is_unlinked: bool,
@@ -394,6 +394,13 @@ async fn handle_request(
                 return get_response_with_code("Internal server error.", 500);
             };
 
+            let Some(user_id) = claim.user_id else {
+                return get_response_with_code(
+                    "You need to allow the extension to view your identity.",
+                    200,
+                );
+            };
+
             let is_moderator = claim.role == "moderator" || claim.role == "broadcaster";
 
             let Ok(query) = serde_json::to_string(&GameCMTVCommand {
@@ -403,7 +410,7 @@ async fn handle_request(
                 command: "follow".to_string(),
                 args: request.name,
                 is_moderator,
-                user_id: claim.user_id,
+                user_id,
                 username: None,
             }) else {
                 return get_response_with_code("An error occured preparing to fetch data!", 501);

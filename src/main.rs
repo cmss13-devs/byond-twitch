@@ -366,7 +366,7 @@ async fn handle_request(
 
             Ok(response)
         }
-        "follow_player" => {
+        "/follow_player" => {
             let Some(twitch_secret) = twitch_secret else {
                 return get_response_with_code("Server not set up.", 500);
             };

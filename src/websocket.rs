@@ -1,4 +1,4 @@
-use eyre::WrapErr;
+use eyre::{eyre, WrapErr};
 use futures::TryStreamExt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -142,7 +142,10 @@ impl ChatWebsocketClient {
         let token = self.token.lock().await;
         let transport = eventsub::Transport::websocket(data.id.clone());
         for id in &self.chats {
-            let user_id = token.user_id().unwrap().to_owned();
+            let Some(user_id) = token.user_id() else {
+                return Err(eyre!("Could not locate user ID"));
+            };
+
             let subs: Vec<_> = self
                 .client
                 .get_eventsub_subscriptions(Some(eventsub::Status::Enabled), None, None, &*token)
@@ -164,8 +167,7 @@ impl ChatWebsocketClient {
             if !subs.is_empty() {
                 continue;
             }
-            let message =
-                eventsub::channel::chat::ChannelChatMessageV1::new(id.clone(), user_id.clone());
+            let message = eventsub::channel::chat::ChannelChatMessageV1::new(id.clone(), user_id);
             self.client
                 .create_eventsub_subscription(message, transport.clone(), &*token)
                 .await?;

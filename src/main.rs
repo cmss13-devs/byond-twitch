@@ -1,6 +1,7 @@
 pub mod server;
 pub mod websocket;
 
+use eyre::eyre;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
@@ -71,6 +72,11 @@ impl Config {
 #[tokio::main]
 async fn main() -> Result<(), eyre::Report> {
     color_eyre::install()?;
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        prev(info);
+        std::process::exit(1);
+    }));
     tracing_subscriber::fmt::fmt()
         .with_writer(std::io::stderr)
         .init();
@@ -131,7 +137,9 @@ async fn main() -> Result<(), eyre::Report> {
         return Ok(());
     }
 
-    let broadcaster_user_token = broadcaster_user_token.unwrap();
+    let Some(broadcaster_user_token) = broadcaster_user_token else {
+        return Err(eyre!("Could not unwrap token"));
+    };
 
     if let Some(refresh_token) = &broadcaster_user_token.refresh_token {
         let _ = std::fs::write(
@@ -597,12 +605,10 @@ impl Bot {
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
 
-                        let existing_response: Vec<get_predictions::Prediction> = inner_client
-                            .req_get(request, &*token)
-                            .await
-                            .wrap_err("unable to get existing predictions from api")
-                            .unwrap()
-                            .data;
+                        let Ok(existing_response) = inner_client.req_get(request, &*token).await
+                        else {
+                            continue;
+                        };
 
                         let Some(first_response) = existing_response.first() else {
                             tracing::warn!("no responses from api");
@@ -696,7 +702,11 @@ impl Bot {
                 );
                 if let Some(full_command) = payload.message.text.strip_prefix("!") {
                     let mut split_whitespace = full_command.split_whitespace();
-                    let command = split_whitespace.next().unwrap();
+
+                    let Some(command) = split_whitespace.next() else {
+                        return Err(eyre!("Unable to find command."));
+                    };
+
                     let rest = full_command.replace(command, "");
 
                     self.command(
@@ -762,11 +772,11 @@ impl Bot {
             source: "byond-twitch".to_string(),
         })?;
 
-        let ByondTopicValue::String(mut received) = http2byond::send_byond(
-            &self.config.byond_host.to_socket_addrs()?.next().unwrap(),
-            &json,
-        )?
-        else {
+        let Some(address) = &self.config.byond_host.to_socket_addrs()?.next() else {
+            return Err(eyre!("Could not locate address for BYOND host"));
+        };
+
+        let ByondTopicValue::String(mut received) = http2byond::send_byond(address, &json)? else {
             return Ok(());
         };
 

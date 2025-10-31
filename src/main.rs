@@ -211,9 +211,9 @@ async fn main() -> Result<(), eyre::Report> {
 
 #[derive(Deserialize, Debug)]
 #[allow(dead_code)]
-struct RedisRoundStart {
+struct RedisRoundEvent {
     source: String,
-    round_id: i32,
+    round_id: String,
 
     #[serde(rename = "type")]
     _type: String,
@@ -661,7 +661,7 @@ impl Bot {
                     continue;
                 };
 
-                let Ok(deserialized) = serde_json::from_str::<RedisRoundStart>(&unwrapped) else {
+                let Ok(deserialized) = serde_json::from_str::<RedisRoundEvent>(&unwrapped) else {
                     tracing::info!("could not deserialise");
                     continue;
                 };

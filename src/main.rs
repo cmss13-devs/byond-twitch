@@ -13,11 +13,12 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
 use serde::Deserialize;
 use tokio::sync::{broadcast, Mutex};
+use tracing::instrument;
 use twitch_api::helix::predictions::create_prediction::{self, NewPredictionOutcome};
 use twitch_api::helix::predictions::{end_prediction, get_predictions};
 use twitch_api::helix::{self};
 use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
-use twitch_api::types::{PredictionStatus, Timestamp, UserId};
+use twitch_api::types::{PredictionStatus, Timestamp};
 use twitch_api::{
     client::ClientDefault,
     eventsub::{self, Event, Message, Payload},
@@ -59,7 +60,7 @@ impl Config {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), eyre::Report> {
     color_eyre::install()?;
     tracing_subscriber::fmt::fmt()
@@ -325,6 +326,7 @@ impl Bot {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     fn start_redis_websocket(&self, redis_url: String) -> Result<(), eyre::Report> {
         tracing::info!("connecting to redis");
 

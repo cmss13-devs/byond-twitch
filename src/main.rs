@@ -11,14 +11,15 @@ use std::sync::Arc;
 use clap::Parser;
 use eyre::WrapErr as _;
 use http2byond::ByondTopicValue;
-use http_body_util::Full;
-use hyper::body::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::body::{self, Bytes};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
+use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use twitch_api::helix;
@@ -77,14 +78,6 @@ async fn main() -> Result<(), eyre::Report> {
     if let Some(redis_url) = config.redis_url.clone() {
         let _ = start_redis_websocket(redis_url).await;
     }
-
-    let byond_host = config.byond_host.clone();
-    let comms_key = config.comms_key.clone();
-    // tokio::spawn(async move {
-    let _ = start_webserver(byond_host, comms_key).await;
-    // });
-
-    return Ok(());
 
     let client: HelixClient<reqwest::Client> = twitch_api::HelixClient::with_client(
         ClientDefault::default_client_with_name(Some("my_chatbot".parse()?))?,
@@ -231,6 +224,7 @@ async fn start_webserver(byond_host: String, comms_key: String) -> Result<(), ey
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
 
     let listener = TcpListener::bind(addr).await?;
+    let role_icons = Arc::new(Mutex::new(RequestCache::default()));
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -239,12 +233,19 @@ async fn start_webserver(byond_host: String, comms_key: String) -> Result<(), ey
 
         let byond_host = byond_host.clone();
         let comms_key = comms_key.clone();
+        let role_icons = role_icons.clone();
+
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
                 .serve_connection(
                     io,
                     service_fn(move |req| {
-                        handle_request(req, byond_host.to_owned(), comms_key.to_owned())
+                        handle_request(
+                            req,
+                            byond_host.to_owned(),
+                            comms_key.to_owned(),
+                            role_icons.to_owned(),
+                        )
                     }),
                 )
                 .await
@@ -255,38 +256,74 @@ async fn start_webserver(byond_host: String, comms_key: String) -> Result<(), ey
     }
 }
 
+#[derive(Default)]
+struct RequestCache {
+    role_icons: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct SetRoleIcons {
+    auth_key: String,
+    role_icons: HashMap<String, String>,
+}
+
 async fn handle_request(
     request: Request<hyper::body::Incoming>,
     byond_host: String,
     comms_key: String,
+    request_cache: Arc<Mutex<RequestCache>>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     match request.uri().path() {
-        "/role_icons" => {
+        "/role_icons" => match *request.method() {
+            Method::GET => {
+                let locked = request_cache.lock().await;
+
+                let Ok(response) = Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Full::new(Bytes::from(
+                        serde_json::to_string(&locked.role_icons).unwrap(),
+                    )))
+                else {
+                    return get_response_with_code("An error occured while preparing data!", 501);
+                };
+
+                Ok(response)
+            }
+            Method::POST => {
+                let full = request.collect().await.unwrap().to_bytes();
+                let body_str = String::from_utf8(full.to_vec()).unwrap();
+
+                let deserialised_body = serde_json::from_str::<SetRoleIcons>(&body_str).unwrap();
+
+                if deserialised_body.auth_key != comms_key {
+                    return get_response_with_code("Invalid comms key!", 401);
+                };
+
+                let mut locked = request_cache.lock().await;
+                locked.role_icons.clear();
+
+                for (key, value) in deserialised_body.role_icons.iter() {
+                    locked.role_icons.insert(key.to_owned(), value.to_owned());
+                }
+
+                get_response_with_code("Accepted.", 200)
+            }
+            _ => get_response_with_code("Bad method.", 404),
+        },
+        "/active_players" => {
             let Ok(query) = serde_json::to_string(&GameRequest {
-                query: "role_icons".to_string(),
+                query: "active_mobs".to_string(),
                 auth: Some(comms_key),
                 source: "byond-twitch-web".to_string(),
             }) else {
                 return get_response_with_code("An error occured preparing to fetch data!", 501);
             };
 
-            /*
-            let Ok(mut received) = http2byond::send_byond(
+            let Ok(ByondTopicValue::String(mut received)) = http2byond::send_byond(
                 &byond_host.to_socket_addrs().unwrap().next().unwrap(),
                 &query,
             ) else {
                 return get_response_with_code("An error occured fetching data!", 501);
-            };
-            */
-
-            let mut received = match http2byond::send_byond(
-                &byond_host.to_socket_addrs().unwrap().next().unwrap(),
-                &query,
-            ) {
-                Ok(ByondTopicValue::String(ok)) => ok,
-                Ok(ByondTopicValue::Number(num)) => panic!("{:?}", num),
-                Ok(ByondTopicValue::None) => panic!("No data"),
-                Err(err) => panic!("{:?}", err),
             };
 
             received.pop();
@@ -295,32 +332,19 @@ async fn handle_request(
                 return get_response_with_code("An error occured deserializing data!", 501);
             };
 
-            /*
-            let response = match serde_json::from_str::<GameResponse>(&received) {
-                Ok(res) => res,
-                Err(err) => panic!("{:?}", err),
-            };
-            */
-
-            let Some(GameResponseData::RoleIcons(icons)) = response.data else {
-                return get_response_with_code(&response.response, 200);
-            };
-
             let Ok(response) = Response::builder()
                 .header("Content-Type", "application/json")
                 .body(Full::new(Bytes::from(
-                    serde_json::to_string(&icons).unwrap(),
+                    serde_json::to_string(&response.data).unwrap(),
                 )))
             else {
                 return get_response_with_code("An error occured while preparing data!", 501);
             };
 
-            return Ok(response);
+            Ok(response)
         }
-        "/active_players" => {}
-        _ => {}
+        _ => get_response_with_code("Bad path.", 404),
     }
-    Ok(Response::new(Full::new(Bytes::from("Hello, World!"))))
 }
 
 fn get_response_with_code(
@@ -582,12 +606,11 @@ struct GameRequest {
 struct GameResponse {
     statuscode: i32,
     response: String,
-    data: Option<GameResponseData>,
+    data: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
 enum GameResponseData {
-    RoleIcons(HashMap<String, String>),
     CharacterNames(Vec<String>),
 }
 

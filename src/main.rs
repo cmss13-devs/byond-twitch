@@ -59,7 +59,7 @@ impl Config {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), eyre::Report> {
     color_eyre::install()?;
     tracing_subscriber::fmt::fmt()
@@ -372,6 +372,8 @@ impl Bot {
 
                 match deserialized._type.as_str() {
                     "round-start" => {
+                        tracing::info!("redis: round start");
+
                         let broadcaster_user_token = broadcaster_user_token.lock().await;
 
                         let request =
@@ -379,6 +381,7 @@ impl Bot {
                         let existing_response: Vec<get_predictions::Prediction> = inner_client
                             .req_get(request, &*broadcaster_user_token)
                             .await
+                            .wrap_err("unable to get existing predictions from api")
                             .unwrap()
                             .data;
 
@@ -414,7 +417,9 @@ impl Bot {
 
                         let _ = inner_client
                             .req_post(request, body, &*broadcaster_user_token)
-                            .await;
+                            .await
+                            .wrap_err("error creating new prediction")
+                            .unwrap();
                         let _ = inner_client
                             .send_chat_message(
                                 &broadcaster_id,
@@ -422,18 +427,29 @@ impl Bot {
                                 "New round beginning! Vote on the outcome for the next 20 minutes.",
                                 &*broadcaster_user_token,
                             )
-                            .await;
+                            .await
+                            .wrap_err("error writing to chat")
+                            .unwrap();
+
+                        tracing::info!("created new prediction");
                     }
                     "round-complete" => {
+                        tracing::info!("redis: round complete");
+
                         let token = broadcaster_user_token.lock().await;
 
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
 
-                        let existing_response: Vec<get_predictions::Prediction> =
-                            inner_client.req_get(request, &*token).await.unwrap().data;
+                        let existing_response: Vec<get_predictions::Prediction> = inner_client
+                            .req_get(request, &*token)
+                            .await
+                            .wrap_err("unable to get existing predictions from api")
+                            .unwrap()
+                            .data;
 
                         let Some(first_response) = existing_response.first() else {
+                            tracing::warn!("no responses from api");
                             continue;
                         };
 
@@ -441,10 +457,16 @@ impl Bot {
                             .title
                             .contains(&deserialized.round_id.to_string())
                         {
+                            tracing::warn!(
+                                "most recent prediction not our roundid: {} vs {}",
+                                &first_response.title,
+                                &deserialized.round_id
+                            );
                             continue;
                         }
 
                         let Some(outcome) = deserialized.round_finished else {
+                            tracing::warn!("could not deserialize information from game");
                             continue;
                         };
 
@@ -453,6 +475,8 @@ impl Bot {
                         } else if outcome.contains("Marine") {
                             "Marines"
                         } else {
+                            tracing::warn!("unexpected outcome, cancelling");
+
                             let request = end_prediction::EndPredictionRequest::new();
                             let body = end_prediction::EndPredictionBody::new(
                                 &broadcaster_id,

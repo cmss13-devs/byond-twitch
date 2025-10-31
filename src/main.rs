@@ -204,7 +204,7 @@ struct RedisRoundStart {
 }
 
 async fn start_webserver(byond_host: String, comms_key: String) -> Result<(), eyre::Report> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
 
     let listener = TcpListener::bind(addr).await?;
     let role_icons = Arc::new(Mutex::new(RequestCache::default()));

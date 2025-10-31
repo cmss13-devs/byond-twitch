@@ -2,7 +2,9 @@ pub mod server;
 pub mod websocket;
 
 use eyre::eyre;
-use std::collections::HashMap;
+use hmac::{Hmac, Mac};
+use sha2::Sha384;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -18,6 +20,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
+use jwt::VerifyWithKey;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
@@ -60,6 +63,7 @@ pub struct Config {
     response_user_id: String,
     discord_webhook: Option<String>,
     redis_url: Option<String>,
+    twitch_secret: Option<String>,
 }
 
 impl Config {
@@ -88,9 +92,10 @@ async fn main() -> Result<(), eyre::Report> {
 
     let byond_host = config.byond_host.clone();
     let comms_key = config.comms_key.clone();
+    let twitch_key = config.twitch_secret.clone();
 
     tokio::spawn(async move {
-        let _ = start_webserver(byond_host, comms_key).await;
+        let _ = start_webserver(byond_host, comms_key, twitch_key).await;
     });
 
     let client: HelixClient<reqwest::Client> = twitch_api::HelixClient::with_client(
@@ -214,7 +219,11 @@ struct RedisRoundStart {
     round_finished: Option<String>,
 }
 
-async fn start_webserver(byond_host: String, comms_key: String) -> Result<(), eyre::Report> {
+async fn start_webserver(
+    byond_host: String,
+    comms_key: String,
+    twitch_secret: Option<String>,
+) -> Result<(), eyre::Report> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
 
     let listener = TcpListener::bind(addr).await?;
@@ -228,6 +237,7 @@ async fn start_webserver(byond_host: String, comms_key: String) -> Result<(), ey
         let byond_host = byond_host.clone();
         let comms_key = comms_key.clone();
         let role_icons = role_icons.clone();
+        let twitch_secret = twitch_secret.clone();
 
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -239,6 +249,7 @@ async fn start_webserver(byond_host: String, comms_key: String) -> Result<(), ey
                             byond_host.to_owned(),
                             comms_key.to_owned(),
                             role_icons.to_owned(),
+                            twitch_secret.to_owned(),
                         )
                     }),
                 )
@@ -261,11 +272,29 @@ struct SetRoleIcons {
     role_icons: HashMap<String, String>,
 }
 
+#[derive(Deserialize)]
+struct FollowPlayerRequest {
+    token: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct TwitchExtToken {
+    exp: i32,
+    opaque_user_id: String,
+    user_id: String,
+    channel_id: String,
+    role: String,
+    is_unlinked: bool,
+}
+
 async fn handle_request(
     request: Request<hyper::body::Incoming>,
     byond_host: String,
     comms_key: String,
     request_cache: Arc<Mutex<RequestCache>>,
+    twitch_secret: Option<String>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     match request.uri().path() {
         "/role_icons" => match *request.method() {
@@ -336,6 +365,59 @@ async fn handle_request(
             };
 
             Ok(response)
+        }
+        "follow_player" => {
+            let Some(twitch_secret) = twitch_secret else {
+                return get_response_with_code("Server not set up.", 500);
+            };
+
+            let full = request.collect().await.unwrap().to_bytes();
+            let body_str = String::from_utf8(full.to_vec()).unwrap();
+
+            let Ok(request) = serde_json::from_str::<FollowPlayerRequest>(&body_str) else {
+                return get_response_with_code("Invalid request.", 503);
+            };
+
+            let Ok(hmac): Result<Hmac<Sha384>, _> = Hmac::new_from_slice(twitch_secret.as_bytes())
+            else {
+                return get_response_with_code("Internal server error.", 500);
+            };
+
+            let Ok(claim): Result<TwitchExtToken, jwt::Error> =
+                request.token.verify_with_key(&hmac)
+            else {
+                return get_response_with_code("Internal server error.", 500);
+            };
+
+            let is_moderator = claim.role == "moderator" || claim.role == "broadcaster";
+
+            let Ok(query) = serde_json::to_string(&GameCMTVCommand {
+                query: "cmtv".to_string(),
+                auth: Some(comms_key),
+                source: "byond-twitch-web".to_string(),
+                command: "follow".to_string(),
+                args: request.name,
+                is_moderator,
+                user_id: claim.user_id,
+                username: None,
+            }) else {
+                return get_response_with_code("An error occured preparing to fetch data!", 501);
+            };
+
+            let Ok(ByondTopicValue::String(mut received)) = http2byond::send_byond(
+                &byond_host.to_socket_addrs().unwrap().next().unwrap(),
+                &query,
+            ) else {
+                return get_response_with_code("An error occured fetching data!", 501);
+            };
+
+            received.pop();
+
+            let Ok(response) = serde_json::from_str::<GameResponse>(&received) else {
+                return get_response_with_code("An error occured deserializing data!", 501);
+            };
+
+            get_response_with_code(&response.response, response.statuscode.try_into().unwrap())
         }
         _ => get_response_with_code("Bad path.", 404),
     }
@@ -767,7 +849,8 @@ impl Bot {
         let json = serde_json::to_string(&GameCMTVCommand {
             query: "cmtv".to_string(),
             command: command.to_string(),
-            username: payload.chatter_user_login.to_string(),
+            username: Some(payload.chatter_user_login.to_string()),
+            user_id: payload.chatter_user_id.to_string(),
             is_moderator,
             auth: Some(self.config.comms_key.clone()),
             args: _rest.to_string(),
@@ -827,7 +910,8 @@ struct GameCMTVCommand {
     query: String,
     command: String,
     args: String,
-    username: String,
+    username: Option<String>,
+    user_id: String,
     is_moderator: bool,
     auth: Option<String>,
     source: String,

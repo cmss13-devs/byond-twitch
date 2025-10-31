@@ -47,6 +47,7 @@ pub struct Cli {
 pub struct Config {
     byond_host: String,
     comms_key: String,
+    response_user_id: String,
     discord_webhook: Option<String>,
     redis_url: Option<String>,
 }
@@ -343,6 +344,7 @@ impl Bot {
         let broadcaster_id = self.broadcaster.clone();
         let inner_client = self.client.clone();
         let broadcaster_user_token = self.broadcaster_user_token.clone();
+        let response_user_id = self.config.response_user_id.clone();
         tokio::spawn(async move {
             let redis_client = redis::Client::open(redis_url).unwrap();
 
@@ -416,7 +418,7 @@ impl Bot {
                         let _ = inner_client
                             .send_chat_message(
                                 &broadcaster_id,
-                                &broadcaster_user_token.user_id,
+                                &response_user_id,
                                 "New round beginning! Vote on the outcome for the next 20 minutes.",
                                 &*broadcaster_user_token,
                             )
@@ -479,7 +481,7 @@ impl Bot {
                             let _ = inner_client
                                 .send_chat_message(
                                     &broadcaster_id,
-                                    &token.user_id,
+                                    &response_user_id,
                                     &*format!("Round finished! The result was {}.", outcome),
                                     &*token,
                                 )
@@ -596,7 +598,7 @@ impl Bot {
             .client
             .send_chat_message_reply(
                 &subscription.condition.broadcaster_user_id,
-                UserId::from_static("1379066826"),
+                &self.config.response_user_id,
                 &payload.message_id,
                 &*response.response,
                 token,

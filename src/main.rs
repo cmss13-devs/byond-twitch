@@ -80,6 +80,7 @@ async fn main() -> Result<(), eyre::Report> {
 
     let byond_host = config.byond_host.clone();
     let comms_key = config.comms_key.clone();
+
     tokio::spawn(async move {
         let _ = start_webserver(byond_host, comms_key).await;
     });
@@ -800,7 +801,7 @@ struct GameRequest {
 struct GameResponse {
     statuscode: i32,
     response: String,
-    data: Vec<Player>,
+    data: Option<Vec<Player>>,
 }
 
 #[derive(Deserialize, Serialize)]

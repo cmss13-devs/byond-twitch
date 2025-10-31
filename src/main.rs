@@ -2,7 +2,9 @@ pub mod server;
 pub mod websocket;
 
 use base64::Engine;
+use chrono::{DateTime, Duration, Utc};
 use eyre::eyre;
+use futures::lock::MutexGuard;
 use hmac::{Hmac, Mac};
 use sha2::{Sha256, Sha384};
 use std::collections::{BTreeMap, HashMap};
@@ -265,6 +267,9 @@ async fn start_webserver(
 #[derive(Default)]
 struct RequestCache {
     role_icons: HashMap<String, String>,
+
+    cached_status: Option<GameResponse>,
+    cached_time: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -335,6 +340,32 @@ async fn handle_request(
             _ => get_response_with_code("Bad method.", 404),
         },
         "/active_players" => {
+            {
+                let cache = request_cache.lock().await;
+
+                if let Some(cached_time) = cache.cached_time {
+                    if let Some(cached_data) = &cache.cached_status {
+                        let five_seconds_ago = chrono::Utc::now() - Duration::seconds(5);
+
+                        if cached_time > five_seconds_ago {
+                            let Ok(response) = Response::builder()
+                                .header("Content-Type", "application/json")
+                                .body(Full::new(Bytes::from(
+                                    serde_json::to_string(&cached_data.data).unwrap(),
+                                )))
+                            else {
+                                return get_response_with_code(
+                                    "An error occured while preparing data!",
+                                    501,
+                                );
+                            };
+
+                            return Ok(response);
+                        }
+                    }
+                }
+            }
+
             let Ok(query) = serde_json::to_string(&GameRequest {
                 query: "active_mobs".to_string(),
                 auth: Some(comms_key),
@@ -352,18 +383,25 @@ async fn handle_request(
 
             received.pop();
 
-            let Ok(response) = serde_json::from_str::<GameResponse>(&received) else {
+            let Ok(game_response) = serde_json::from_str::<GameResponse>(&received) else {
                 return get_response_with_code("An error occured deserializing data!", 501);
             };
 
             let Ok(response) = Response::builder()
                 .header("Content-Type", "application/json")
                 .body(Full::new(Bytes::from(
-                    serde_json::to_string(&response.data).unwrap(),
+                    serde_json::to_string(&game_response.data).unwrap(),
                 )))
             else {
                 return get_response_with_code("An error occured while preparing data!", 501);
             };
+
+            {
+                let mut cache = request_cache.lock().await;
+
+                cache.cached_status = Some(game_response.clone());
+                cache.cached_time = Some(chrono::Utc::now());
+            }
 
             Ok(response)
         }
@@ -908,7 +946,7 @@ struct GameRequest {
     source: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Deserialize, Clone)]
 #[allow(dead_code)]
 struct GameResponse {
     statuscode: i32,
@@ -916,7 +954,7 @@ struct GameResponse {
     data: Option<Vec<Player>>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 struct Player {
     name: String,
     job: String,

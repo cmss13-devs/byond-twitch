@@ -596,7 +596,7 @@ impl Bot {
             .client
             .send_chat_message_reply(
                 &subscription.condition.broadcaster_user_id,
-                &subscription.condition.user_id,
+                token.user_id().unwrap(),
                 &payload.message_id,
                 &*response.response,
                 token,

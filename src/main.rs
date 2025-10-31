@@ -243,6 +243,8 @@ impl Bot {
     }
 
     fn start_clip_polling(&self) -> Result<(), eyre::Report> {
+        tracing::info!("starting clip polling...");
+
         let broadcaster = self.broadcaster.clone();
         let inner_client = self.client.clone();
         let app_token = self.bot_app_token.clone();
@@ -307,6 +309,7 @@ impl Bot {
                         .send()
                         .await;
 
+                    tracing::info!("Clip Published: {}", &response.id);
                     all_published.push(response.id);
                 }
                 published_clips.clear();
@@ -322,6 +325,8 @@ impl Bot {
     }
 
     fn start_redis_websocket(&self, redis_url: String) -> Result<(), eyre::Report> {
+        tracing::info!("connecting to redis");
+
         let (tx, _) = broadcast::channel::<String>(100);
 
         let socket_tx = tx.clone();
@@ -345,6 +350,8 @@ impl Bot {
             let mut pub_sub = conn.as_pubsub();
 
             pub_sub.subscribe(&["byond.round"]).unwrap();
+
+            tracing::info!("connected to redis");
 
             loop {
                 let msg = pub_sub.get_message().unwrap();

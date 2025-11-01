@@ -582,6 +582,8 @@ impl Bot {
                             .send_chat_message(&broadcaster, &sender_id, *chosen, &*app_token)
                             .await;
                     }
+
+                    every_5 = 0;
                 }
 
                 let token_guard = app_token.lock().await;

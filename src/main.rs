@@ -555,13 +555,13 @@ impl Bot {
                 return;
             };
 
-            let mut every_5 = 0;
+            let mut every_10 = 0;
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                every_5 += 1;
+                every_10 += 1;
 
-                if every_5 > 5 {
+                if every_10 > 10 {
                     let app_token = app_token.lock().await;
 
                     let options = [
@@ -583,7 +583,7 @@ impl Bot {
                             .await;
                     }
 
-                    every_5 = 0;
+                    every_10 = 0;
                 }
 
                 let token_guard = app_token.lock().await;

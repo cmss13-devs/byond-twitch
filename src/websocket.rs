@@ -58,35 +58,41 @@ impl ChatWebsocketClient {
     where
         Fut: std::future::Future<Output = Result<(), eyre::Report>>,
     {
-        // Establish the stream
-        let mut s = self
-            .connect()
-            .await
-            .context("when establishing connection")?;
-        // Loop over the stream, processing messages as they come in.
-        while let Some(msg) = futures::StreamExt::next(&mut s).await {
-            let span = tracing::debug_span!("message received", raw_message = ?msg);
-            let msg = match msg {
-                Err(tungstenite::Error::Protocol(
-                    tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
-                )) => {
-                    tracing::warn!(
+        loop {
+            // Establish the stream
+            let mut s = self
+                .connect()
+                .await
+                .context("when establishing connection")?;
+            // Loop over the stream, processing messages as they come in.
+            while let Some(msg) = futures::StreamExt::next(&mut s).await {
+                let span = tracing::debug_span!("message received", raw_message = ?msg);
+                let msg = match msg {
+                    Err(tungstenite::Error::Protocol(
+                        tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                    )) => {
+                        tracing::warn!(
                         "connection was sent an unexpected frame or was reset, reestablishing it"
                     );
-                    s = self
-                        .connect()
-                        .instrument(span)
-                        .await
-                        .context("when reestablishing connection")?;
-                    continue;
+                        s = self
+                            .connect()
+                            .instrument(span)
+                            .await
+                            .context("when reestablishing connection")?;
+                        continue;
+                    }
+                    _ => msg.context("when getting message")?,
+                };
+                match self
+                    .process_message(msg, &mut event_fn)
+                    .instrument(span)
+                    .await
+                {
+                    Ok(()) => continue,
+                    Err(_) => break,
                 }
-                _ => msg.context("when getting message")?,
-            };
-            self.process_message(msg, &mut event_fn)
-                .instrument(span)
-                .await?
+            }
         }
-        Ok(())
     }
 
     /// Process a message from the websocket
@@ -128,7 +134,7 @@ impl ChatWebsocketClient {
                     _ => Ok(()),
                 }
             }
-            tungstenite::Message::Close(_) => todo!(),
+            tungstenite::Message::Close(_) => eyre::bail!("websocket closed"),
             _ => Ok(()),
         }
     }

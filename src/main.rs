@@ -642,6 +642,8 @@ impl Bot {
         let broadcaster_id = self.broadcaster.clone();
         let inner_client = self.client.clone();
         let broadcaster_user_token = self.broadcaster_user_token.clone();
+
+        let app_access_token = self.bot_app_token.clone();
         let response_user_id = self.config.response_user_id.clone();
         tokio::spawn(async move {
             let redis_client = redis::Client::open(redis_url).unwrap();
@@ -678,6 +680,7 @@ impl Bot {
                         tracing::info!("redis: round start");
 
                         let broadcaster_user_token = broadcaster_user_token.lock().await;
+                        let app_access_token = app_access_token.lock().await;
 
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
@@ -728,7 +731,7 @@ impl Bot {
                                 &broadcaster_id,
                                 &response_user_id,
                                 "New round beginning! Vote on the outcome for the next 20 minutes.",
-                                &*broadcaster_user_token,
+                                &*app_access_token,
                             )
                             .await
                             .wrap_err("error writing to chat")
@@ -739,12 +742,15 @@ impl Bot {
                     "round-complete" => {
                         tracing::info!("redis: round complete");
 
-                        let token = broadcaster_user_token.lock().await;
+                        let broadcaster_user_token = broadcaster_user_token.lock().await;
+                        let app_access_token = app_access_token.lock().await;
 
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
 
-                        let Ok(existing_response) = inner_client.req_get(request, &*token).await
+                        let Ok(existing_response) = inner_client
+                            .req_get(request, &*broadcaster_user_token)
+                            .await
                         else {
                             continue;
                         };
@@ -785,7 +791,9 @@ impl Bot {
                                 PredictionStatus::Canceled,
                             );
 
-                            let _ = inner_client.req_patch(request, body, &*token).await;
+                            let _ = inner_client
+                                .req_patch(request, body, &*broadcaster_user_token)
+                                .await;
                             continue;
                         };
 
@@ -802,13 +810,15 @@ impl Bot {
                             )
                             .winning_outcome_id(&prediction.id);
 
-                            let _ = inner_client.req_patch(request, body, &*token).await;
+                            let _ = inner_client
+                                .req_patch(request, body, &*broadcaster_user_token)
+                                .await;
                             let _ = inner_client
                                 .send_chat_message(
                                     &broadcaster_id,
                                     &response_user_id,
                                     &*format!("Round finished! The result was {}.", outcome),
-                                    &*token,
+                                    &*app_access_token,
                                 )
                                 .await;
 

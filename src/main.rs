@@ -23,6 +23,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use jwt::VerifyWithKey;
+use rand::seq::IndexedRandom;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
@@ -496,7 +497,7 @@ pub struct Bot {
 
 impl Bot {
     pub async fn start(&self) -> Result<(), eyre::Report> {
-        let _ = self.start_clip_polling();
+        let _ = self.start_api_loop();
 
         if let Some(redis_url) = self.config.redis_url.clone() {
             let _ = self.start_redis_websocket(redis_url);
@@ -539,10 +540,11 @@ impl Bot {
         Ok(())
     }
 
-    fn start_clip_polling(&self) -> Result<(), eyre::Report> {
-        tracing::info!("starting clip polling...");
+    fn start_api_loop(&self) -> Result<(), eyre::Report> {
+        tracing::info!("starting api loop...");
 
         let broadcaster = self.broadcaster.clone();
+        let sender_id = self.config.response_user_id.clone();
         let inner_client = self.client.clone();
         let app_token = self.bot_app_token.clone();
         let published_clips = self.published_clips.clone();
@@ -553,9 +555,34 @@ impl Bot {
                 return;
             };
 
+            let mut every_5 = 0;
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
+                every_5 += 1;
+
+                if every_5 > 5 {
+                    let app_token = app_token.lock().await;
+
+                    let options = [
+                        "Go to our website https://cm-ss13.com/play to learn how to get involved in the action!",
+                        "View available chat commands using !help.",
+                        "You can switch the perspective of the camera every 30 minutes using !follow.",
+                        "Join our Discord https://discord.gg/cmss13 to get involved with the community!",
+                        "Browse our forums at https://forum.cm-ss13.com for community discussion, guides and more!",
+                        "Did you know: The combat correspondent's camera will always be followed by the stream when they are broadcasting.",
+                        "Worried about joining the game? Don't be! Our team of mentors are always ready to help.",
+                        "Browse our wiki at https://cm-ss13.com/wiki to get an idea of the game.",
+                        "CM-SS13 is open-source! You can download and contribute to the code on our GitHub https://github.com/cmss13-devs/cmss13."
+                    ];
+                    let chosen = options.choose(&mut rand::rng());
+
+                    if let Some(chosen) = chosen {
+                        let _ = inner_client
+                            .send_chat_message(&broadcaster, &sender_id, *chosen, &*app_token)
+                            .await;
+                    }
+                }
 
                 let token_guard = app_token.lock().await;
 
@@ -671,8 +698,6 @@ impl Bot {
                     tracing::info!("non-primary source");
                     continue;
                 }
-
-                dbg!("{}", &deserialized);
 
                 match deserialized._type.as_str() {
                     "round-start" => {

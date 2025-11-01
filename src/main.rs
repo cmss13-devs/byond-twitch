@@ -568,12 +568,12 @@ impl Bot {
                         "Go to our website https://cm-ss13.com/play to learn how to get involved in the action!",
                         "View available chat commands using !help.",
                         "You can switch the perspective of the camera every 30 minutes using !follow.",
-                        "Join our Discord https://discord.gg/cmss13 to get involved with the community!",
+                        "Join our Discord at https://discord.gg/cmss13 to get involved with the community!",
                         "Browse our forums at https://forum.cm-ss13.com for community discussion, guides and more!",
                         "Did you know: The combat correspondent's camera will always be followed by the stream when they are broadcasting.",
                         "Worried about joining the game? Don't be! Our team of mentors are always ready to help.",
                         "Browse our wiki at https://cm-ss13.com/wiki to get an idea of the game.",
-                        "CM-SS13 is open-source! You can download and contribute to the code on our GitHub https://github.com/cmss13-devs/cmss13."
+                        "CM-SS13 is open-source! You can download and contribute to the code at https://github.com/cmss13-devs/cmss13 on our GitHub."
                     ];
                     let chosen = options.choose(&mut rand::rng());
 

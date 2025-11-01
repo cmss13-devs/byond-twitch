@@ -565,7 +565,7 @@ impl Bot {
                     let app_token = app_token.lock().await;
 
                     let options = [
-                        "Go to our website https://cm-ss13.com/play to learn how to get involved in the action!",
+                        "Go to our website at https://cm-ss13.com/play to learn how to get involved in the action!",
                         "View available chat commands using !help.",
                         "You can switch the perspective of the camera every 30 minutes using !follow.",
                         "Join our Discord at https://discord.gg/cmss13 to get involved with the community!",

@@ -678,6 +678,15 @@ impl Bot {
                         .send()
                         .await;
 
+                    let _ = inner_client
+                        .send_chat_message(
+                            &broadcaster,
+                            &sender_id,
+                            &*format!("New clip by @{} {}", response.creator_name, response.url),
+                            &token,
+                        )
+                        .await;
+
                     tracing::info!("Clip Published: {}", &response.id);
                     all_published.push(response.id);
                 }
@@ -753,6 +762,7 @@ impl Bot {
 
             while let Ok(msg) = pub_sub.get_message() {
                 if let Ok(payload) = msg.get_payload::<String>() {
+                    tracing::info!("dispatched payload: {}", &payload);
                     let _ = msg_tx.send(payload);
                 }
             }
@@ -761,6 +771,8 @@ impl Bot {
         tokio::spawn(async move {
             tracing::info!("connected to redis");
             while let Some(unwrapped) = msg_rx.recv().await {
+                tracing::info!("received payload: {}", &unwrapped);
+
                 let Ok(deserialized) = serde_json::from_str::<RedisRoundEvent>(&unwrapped) else {
                     tracing::info!("could not deserialise");
                     continue;

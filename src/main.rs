@@ -562,7 +562,7 @@ impl Bot {
                 every_25 += 1;
 
                 if every_25 > 25 {
-                    let app_token = app_token.lock().await;
+                    let app_token = app_token.lock().await.clone();
 
                     let options = [
                         "Go to our website at https://cm-ss13.com/play to learn how to get involved in the action!",

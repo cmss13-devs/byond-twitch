@@ -14,6 +14,7 @@ pub struct WebsocketServer {
 }
 
 impl WebsocketServer {
+    #[must_use]
     pub fn new(addr: SocketAddr, tx: Sender<String>) -> Self {
         WebsocketServer {
             addr,
@@ -37,7 +38,10 @@ impl WebsocketServer {
                             if ws.is_terminated() {
                                 break;
                             }
-                            let _ = ws.send(Message::text(receiver.recv().await.unwrap())).await;
+
+                            if let Ok(message) = receiver.recv().await {
+                                let _ = ws.send(Message::text(message)).await;
+                            }
                         }
                         Ok(())
                     }

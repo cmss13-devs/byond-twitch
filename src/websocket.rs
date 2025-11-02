@@ -88,7 +88,7 @@ impl ChatWebsocketClient {
                     .instrument(span)
                     .await
                 {
-                    Ok(()) => continue,
+                    Ok(()) => (),
                     Err(_) => break,
                 }
             }
@@ -127,10 +127,6 @@ impl ChatWebsocketClient {
                     re @ EventsubWebsocketData::Revocation { .. } => {
                         eyre::bail!("got revocation event: {re:?}")
                     }
-                    EventsubWebsocketData::Keepalive {
-                        metadata: _,
-                        payload: _,
-                    } => Ok(()),
                     _ => Ok(()),
                 }
             }

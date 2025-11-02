@@ -1,3 +1,6 @@
+#![warn(clippy::all, clippy::pedantic, clippy::suspicious)]
+#![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
+
 pub mod server;
 pub mod websocket;
 
@@ -113,7 +116,7 @@ async fn main() -> Result<(), eyre::Report> {
         if exists {
             let read_file = std::fs::read_to_string(token_path)?;
 
-            let tokens: Vec<&str> = read_file.split("|").collect();
+            let tokens: Vec<&str> = read_file.split('|').collect();
 
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -188,7 +191,7 @@ async fn main() -> Result<(), eyre::Report> {
     if fs::exists(published_path)? {
         let read = fs::read_to_string(published_path)?;
 
-        published_clips = read.split("|").map(|split| split.to_string()).collect();
+        published_clips = read.split('|').map(ToString::to_string).collect();
     }
 
     let broadcaster_user_token = Arc::new(Mutex::new(broadcaster_user_token));
@@ -216,7 +219,7 @@ struct RedisRoundEvent {
     round_id: String,
 
     #[serde(rename = "type")]
-    _type: String,
+    string_type: String,
 
     round_name: Option<String>,
     round_finished: Option<String>,
@@ -249,16 +252,16 @@ async fn start_webserver(
                     service_fn(move |req| {
                         handle_request(
                             req,
-                            byond_host.to_owned(),
-                            comms_key.to_owned(),
-                            role_icons.to_owned(),
-                            twitch_secret.to_owned(),
+                            byond_host.clone(),
+                            comms_key.clone(),
+                            role_icons.clone(),
+                            twitch_secret.clone(),
                         )
                     }),
                 )
                 .await
             {
-                eprintln!("Error serving connection: {:?}", err);
+                eprintln!("Error serving connection: {err:?}");
             }
         });
     }
@@ -310,7 +313,7 @@ async fn handle_request(
                 let Ok(response) = Response::builder()
                     .header("Content-Type", "application/json")
                     .body(Full::new(Bytes::from(
-                        serde_json::to_string(&locked.role_icons).unwrap(),
+                        serde_json::to_string(&locked.role_icons).unwrap_or_default(),
                     )))
                 else {
                     return get_response_with_code("An error occured while preparing data!", 501);
@@ -319,19 +322,26 @@ async fn handle_request(
                 Ok(response)
             }
             Method::POST => {
-                let full = request.collect().await.unwrap().to_bytes();
-                let body_str = String::from_utf8(full.to_vec()).unwrap();
+                let Ok(collected) = request.collect().await else {
+                    return get_response_with_code("An error occured.", 501);
+                };
 
-                let deserialised_body = serde_json::from_str::<SetRoleIcons>(&body_str).unwrap();
+                let Ok(body_str) = String::from_utf8(collected.to_bytes().to_vec()) else {
+                    return get_response_with_code("Internal server error.", 501);
+                };
+
+                let Ok(deserialised_body) = serde_json::from_str::<SetRoleIcons>(&body_str) else {
+                    return get_response_with_code("Internal server error.", 501);
+                };
 
                 if deserialised_body.auth_key != comms_key {
                     return get_response_with_code("Invalid comms key!", 401);
-                };
+                }
 
                 let mut locked = request_cache.lock().await;
                 locked.role_icons.clear();
 
-                for (key, value) in deserialised_body.role_icons.iter() {
+                for (key, value) in &deserialised_body.role_icons {
                     locked.role_icons.insert(key.to_owned(), value.to_owned());
                 }
 
@@ -351,7 +361,7 @@ async fn handle_request(
                             let Ok(response) = Response::builder()
                                 .header("Content-Type", "application/json")
                                 .body(Full::new(Bytes::from(
-                                    serde_json::to_string(&cached_data.data).unwrap(),
+                                    serde_json::to_string(&cached_data.data).unwrap_or_default(),
                                 )))
                             else {
                                 return get_response_with_code(
@@ -374,10 +384,16 @@ async fn handle_request(
                 return get_response_with_code("An error occured preparing to fetch data!", 501);
             };
 
-            let Ok(ByondTopicValue::String(mut received)) = http2byond::send_byond(
-                &byond_host.to_socket_addrs().unwrap().next().unwrap(),
-                &query,
-            ) else {
+            let Ok(mut address) = byond_host.to_socket_addrs() else {
+                return get_response_with_code("Internal server error.", 501);
+            };
+
+            let Some(next) = address.next() else {
+                return get_response_with_code("Internal server error.", 501);
+            };
+
+            let Ok(ByondTopicValue::String(mut received)) = http2byond::send_byond(&next, &query)
+            else {
                 return get_response_with_code("An error occured fetching data!", 501);
             };
 
@@ -390,7 +406,7 @@ async fn handle_request(
             let Ok(response) = Response::builder()
                 .header("Content-Type", "application/json")
                 .body(Full::new(Bytes::from(
-                    serde_json::to_string(&game_response.data).unwrap(),
+                    serde_json::to_string(&game_response.data).unwrap_or_default(),
                 )))
             else {
                 return get_response_with_code("An error occured while preparing data!", 501);
@@ -410,19 +426,24 @@ async fn handle_request(
                 return get_response_with_code("Server not set up.", 500);
             };
 
-            let full = request.collect().await.unwrap().to_bytes();
-            let body_str = String::from_utf8(full.to_vec()).unwrap();
+            let Ok(collected) = request.collect().await else {
+                return get_response_with_code("An error occured.", 501);
+            };
+
+            let Ok(body_str) = String::from_utf8(collected.to_bytes().to_vec()) else {
+                return get_response_with_code("Internal server error.", 501);
+            };
 
             let Ok(request) = serde_json::from_str::<FollowPlayerRequest>(&body_str) else {
                 return get_response_with_code("Invalid request.", 503);
             };
 
-            let Ok(hmac): Result<Hmac<Sha256>, _> = Hmac::new_from_slice(
-                base64::prelude::BASE64_STANDARD
-                    .decode(twitch_secret.as_bytes())
-                    .unwrap()
-                    .as_ref(),
-            ) else {
+            let Ok(base_64) = base64::prelude::BASE64_STANDARD.decode(twitch_secret.as_bytes())
+            else {
+                return get_response_with_code("Internal server error.", 501);
+            };
+
+            let Ok(hmac): Result<Hmac<Sha256>, _> = Hmac::new_from_slice(&base_64) else {
                 return get_response_with_code("Internal server errorer.", 500);
             };
 
@@ -454,10 +475,16 @@ async fn handle_request(
                 return get_response_with_code("An error occured preparing to fetch data!", 501);
             };
 
-            let Ok(ByondTopicValue::String(mut received)) = http2byond::send_byond(
-                &byond_host.to_socket_addrs().unwrap().next().unwrap(),
-                &query,
-            ) else {
+            let Ok(mut address) = byond_host.to_socket_addrs() else {
+                return get_response_with_code("Internal server error.", 501);
+            };
+
+            let Some(next) = address.next() else {
+                return get_response_with_code("Internal server error.", 501);
+            };
+
+            let Ok(ByondTopicValue::String(mut received)) = http2byond::send_byond(&next, &query)
+            else {
                 return get_response_with_code("An error occured fetching data!", 501);
             };
 
@@ -467,12 +494,17 @@ async fn handle_request(
                 return get_response_with_code("An error occured deserializing data!", 501);
             };
 
-            get_response_with_code(&response.response, response.statuscode.try_into().unwrap())
+            if let Ok(code) = response.statuscode.try_into() {
+                get_response_with_code(&response.response, code)
+            } else {
+                get_response_with_code("Internal server error.", 501)
+            }
         }
         _ => get_response_with_code("Bad path.", 200),
     }
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn get_response_with_code(
     what_to_say: &str,
     code: u16,
@@ -497,10 +529,10 @@ pub struct Bot {
 
 impl Bot {
     pub async fn start(&self) -> Result<(), eyre::Report> {
-        let _ = self.start_api_loop();
+        self.start_api_loop();
 
         if let Some(redis_url) = self.config.redis_url.clone() {
-            let _ = self.start_redis_websocket(redis_url);
+            let _ = self.start_redis_websocket(&redis_url);
         }
 
         // To make a connection to the chat we need to use a websocket connection.
@@ -540,7 +572,7 @@ impl Bot {
         Ok(())
     }
 
-    fn start_api_loop(&self) -> Result<(), eyre::Report> {
+    fn start_api_loop(&self) {
         tracing::info!("starting api loop...");
 
         let broadcaster = self.broadcaster.clone();
@@ -588,17 +620,24 @@ impl Bot {
 
                 let token = app_token.lock().await.clone();
 
-                let previous_day_rfc3339 = chrono::Utc::now()
-                    .date_naive()
-                    .pred_opt()
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap()
-                    .and_utc()
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let Some(prev_1) = chrono::Utc::now().date_naive().pred_opt() else {
+                    continue;
+                };
+
+                let Some(hms_opt) = prev_1.and_hms_opt(0, 0, 0) else {
+                    continue;
+                };
+
+                let Ok(timestamp) = Timestamp::from_str(
+                    &hms_opt
+                        .and_utc()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                ) else {
+                    continue;
+                };
 
                 let request = helix::clips::GetClipsRequest::broadcaster_id(&broadcaster)
-                    .started_at(Timestamp::from_str(&previous_day_rfc3339).unwrap())
+                    .started_at(timestamp)
                     .to_owned();
 
                 let Ok(responses) = inner_client.req_get(request, &token).await else {
@@ -628,9 +667,13 @@ impl Bot {
                         ..Default::default()
                     };
 
+                    let Ok(webhook_str) = serde_json::to_string(&outbound_webhook) else {
+                        continue;
+                    };
+
                     let _ = request_client
                         .request(Method::POST, &webhook)
-                        .body(serde_json::to_string(&outbound_webhook).unwrap())
+                        .body(webhook_str)
                         .header("Content-Type", "application/json")
                         .send()
                         .await;
@@ -656,12 +699,10 @@ impl Bot {
                 }
             }
         });
-
-        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
-    fn start_redis_websocket(&self, redis_url: String) -> Result<(), eyre::Report> {
+    fn start_redis_websocket(&self, redis_url: &str) -> Result<(), eyre::Report> {
         tracing::info!("connecting to redis");
 
         let (tx, _) = broadcast::channel::<String>(100);
@@ -669,13 +710,13 @@ impl Bot {
         let socket_tx = tx.clone();
         tokio::spawn(async move {
             let socket_server = server::WebsocketServer::new(
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 socket_tx,
             );
             let _ = socket_server.run().await;
         });
 
-        let redis_url = redis_url.clone();
+        let redis_url = redis_url.to_string();
 
         let broadcaster_id = self.broadcaster.clone();
         let inner_client = self.client.clone();
@@ -688,10 +729,27 @@ impl Bot {
         tokio::spawn(async move {
             let redis_url = redis_url.clone();
 
-            let redis_client = redis::Client::open(redis_url).unwrap();
-            let mut conn = redis_client.get_connection().unwrap();
+            let redis_client = match redis::Client::open(redis_url) {
+                Ok(ok) => ok,
+                Err(err) => {
+                    tracing::error!("could not create redis client: {err}");
+                    return;
+                }
+            };
+
+            let mut conn = match redis_client.get_connection() {
+                Ok(connection) => connection,
+                Err(err) => {
+                    tracing::error!("failed to get redis connection: {err}");
+                    return;
+                }
+            };
             let mut pub_sub = conn.as_pubsub();
-            pub_sub.subscribe(&["byond.round"]).unwrap();
+
+            if let Err(err) = pub_sub.subscribe(&["byond.round"]) {
+                tracing::error!("failed to subscribe to channel: {}", err);
+                return;
+            }
 
             while let Ok(msg) = pub_sub.get_message() {
                 if let Ok(payload) = msg.get_payload::<String>() {
@@ -713,7 +771,7 @@ impl Bot {
                     continue;
                 }
 
-                match deserialized._type.as_str() {
+                match deserialized.string_type.as_str() {
                     "round-start" => {
                         tracing::info!("redis: round start");
 
@@ -722,12 +780,13 @@ impl Bot {
 
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
-                        let existing_response: Vec<get_predictions::Prediction> = inner_client
-                            .req_get(request, &broadcaster_user_token)
-                            .await
-                            .wrap_err("unable to get existing predictions from api")
-                            .unwrap()
-                            .data;
+                        let Ok(existing_response_result) =
+                            inner_client.req_get(request, &broadcaster_user_token).await
+                        else {
+                            continue;
+                        };
+                        let existing_response: Vec<get_predictions::Prediction> =
+                            existing_response_result.data;
 
                         if let Some(existing) = existing_response.first() {
                             if existing.status == PredictionStatus::Active
@@ -762,8 +821,10 @@ impl Bot {
                         let _ = inner_client
                             .req_post(request, body, &broadcaster_user_token)
                             .await
-                            .wrap_err("error creating new prediction")
-                            .unwrap();
+                            .inspect_err(|err| {
+                                tracing::error!("error in creating prediction {}", err);
+                            });
+
                         let _ = inner_client
                             .send_chat_message(
                                 &broadcaster_id,
@@ -772,8 +833,7 @@ impl Bot {
                                 &app_access_token,
                             )
                             .await
-                            .wrap_err("error writing to chat")
-                            .unwrap();
+                            .inspect_err(|err| tracing::error!("error in posting to chat {}", err));
 
                         tracing::info!("created new prediction");
                     }
@@ -854,7 +914,7 @@ impl Bot {
                                 .send_chat_message(
                                     &broadcaster_id,
                                     &response_user_id,
-                                    &*format!("Round finished! The result was {}.", outcome),
+                                    &*format!("Round finished! The result was {outcome}."),
                                     &app_access_token,
                                 )
                                 .await;
@@ -934,14 +994,14 @@ impl Bot {
             eventsub::channel::ChannelChatMessageV1,
         >,
         command: &str,
-        _rest: &str,
+        rest: &str,
         token: &AppAccessToken,
     ) -> Result<(), eyre::Report> {
         tracing::info!("Command: {}", command);
 
         let mut is_moderator = false;
 
-        for badge in payload.badges.iter() {
+        for badge in &payload.badges {
             if badge.set_id.clone().take() == "moderator" {
                 is_moderator = true;
                 break;
@@ -955,7 +1015,7 @@ impl Bot {
             user_id: payload.chatter_user_id.to_string(),
             is_moderator,
             auth: Some(self.config.comms_key.clone()),
-            args: _rest.to_string(),
+            args: rest.to_string(),
             source: "byond-twitch".to_string(),
         })?;
 

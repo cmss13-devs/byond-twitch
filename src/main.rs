@@ -520,7 +520,7 @@ impl Bot {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                let mut token = token.lock().await;
+                let mut token = token.lock().await.clone();
                 if token.expires_in() < std::time::Duration::from_secs(60) {
                     token
                         .refresh_token(&self.client)
@@ -562,7 +562,7 @@ impl Bot {
                 every_10 += 1;
 
                 if every_10 > 10 {
-                    let app_token = app_token.lock().await;
+                    let app_token = app_token.lock().await.clone();
 
                     let options = [
                         "Go to our website at https://cm-ss13.com/play to learn how to get involved in the action!",
@@ -579,14 +579,14 @@ impl Bot {
 
                     if let Some(chosen) = chosen {
                         let _ = inner_client
-                            .send_chat_message(&broadcaster, &sender_id, *chosen, &*app_token)
+                            .send_chat_message(&broadcaster, &sender_id, *chosen, &app_token)
                             .await;
                     }
 
                     every_10 = 0;
                 }
 
-                let token_guard = app_token.lock().await;
+                let token = app_token.lock().await.clone();
 
                 let previous_day_rfc3339 = chrono::Utc::now()
                     .date_naive()
@@ -601,18 +601,18 @@ impl Bot {
                     .started_at(Timestamp::from_str(&previous_day_rfc3339).unwrap())
                     .to_owned();
 
-                let Ok(responses) = inner_client.req_get(request, &*token_guard).await else {
+                let Ok(responses) = inner_client.req_get(request, &token).await else {
                     continue;
                 };
 
-                let mut published_clips = published_clips.lock().await;
+                let cloned_clips = published_clips.lock().await.clone();
 
                 let request_client = reqwest::Client::new();
                 let mut wait_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
                 let mut all_published: Vec<String> = Vec::new();
                 for response in responses.data {
-                    if published_clips.contains(&response.id) {
+                    if cloned_clips.contains(&response.id) {
                         all_published.push(response.id.clone());
                         continue;
                     }
@@ -638,12 +638,22 @@ impl Bot {
                     tracing::info!("Clip Published: {}", &response.id);
                     all_published.push(response.id);
                 }
-                published_clips.clear();
-                for clip in all_published {
-                    published_clips.push(clip);
-                }
 
-                let _ = fs::write(persist.join("published.txt"), published_clips.join("|"));
+                let our_clips = {
+                    let mut published_clips = published_clips.lock().await;
+
+                    published_clips.clear();
+                    for clip in all_published {
+                        published_clips.push(clip);
+                    }
+
+                    published_clips.clone()
+                };
+
+                if !our_clips.is_empty() {
+                    let _ =
+                        tokio::fs::write(persist.join("published.txt"), our_clips.join("|")).await;
+                }
             }
         });
 
@@ -670,27 +680,29 @@ impl Bot {
         let broadcaster_id = self.broadcaster.clone();
         let inner_client = self.client.clone();
         let broadcaster_user_token = self.broadcaster_user_token.clone();
-
         let app_access_token = self.bot_app_token.clone();
         let response_user_id = self.config.response_user_id.clone();
-        tokio::spawn(async move {
-            let redis_client = redis::Client::open(redis_url).unwrap();
 
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        tokio::spawn(async move {
+            let redis_url = redis_url.clone();
+
+            let redis_client = redis::Client::open(redis_url).unwrap();
             let mut conn = redis_client.get_connection().unwrap();
             let mut pub_sub = conn.as_pubsub();
-
             pub_sub.subscribe(&["byond.round"]).unwrap();
 
+            while let Ok(msg) = pub_sub.get_message() {
+                if let Ok(payload) = msg.get_payload::<String>() {
+                    let _ = msg_tx.send(payload);
+                }
+            }
+        });
+
+        tokio::spawn(async move {
             tracing::info!("connected to redis");
-
-            loop {
-                let msg = pub_sub.get_message().unwrap();
-
-                let Ok(unwrapped) = msg.get_payload::<String>() else {
-                    tracing::info!("non-string redis message");
-                    continue;
-                };
-
+            while let Some(unwrapped) = msg_rx.recv().await {
                 let Ok(deserialized) = serde_json::from_str::<RedisRoundEvent>(&unwrapped) else {
                     tracing::info!("could not deserialise");
                     continue;
@@ -705,13 +717,13 @@ impl Bot {
                     "round-start" => {
                         tracing::info!("redis: round start");
 
-                        let broadcaster_user_token = broadcaster_user_token.lock().await;
-                        let app_access_token = app_access_token.lock().await;
+                        let broadcaster_user_token = broadcaster_user_token.lock().await.clone();
+                        let app_access_token = app_access_token.lock().await.clone();
 
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
                         let existing_response: Vec<get_predictions::Prediction> = inner_client
-                            .req_get(request, &*broadcaster_user_token)
+                            .req_get(request, &broadcaster_user_token)
                             .await
                             .wrap_err("unable to get existing predictions from api")
                             .unwrap()
@@ -729,7 +741,7 @@ impl Bot {
                                 );
 
                                 let _ = inner_client
-                                    .req_patch(request, body, &*broadcaster_user_token)
+                                    .req_patch(request, body, &broadcaster_user_token)
                                     .await;
                             }
                         }
@@ -748,7 +760,7 @@ impl Bot {
                         let request = create_prediction::CreatePredictionRequest::new();
 
                         let _ = inner_client
-                            .req_post(request, body, &*broadcaster_user_token)
+                            .req_post(request, body, &broadcaster_user_token)
                             .await
                             .wrap_err("error creating new prediction")
                             .unwrap();
@@ -757,7 +769,7 @@ impl Bot {
                                 &broadcaster_id,
                                 &response_user_id,
                                 "New round beginning! Vote on the outcome for the next 20 minutes.",
-                                &*app_access_token,
+                                &app_access_token,
                             )
                             .await
                             .wrap_err("error writing to chat")
@@ -768,15 +780,14 @@ impl Bot {
                     "round-complete" => {
                         tracing::info!("redis: round complete");
 
-                        let broadcaster_user_token = broadcaster_user_token.lock().await;
-                        let app_access_token = app_access_token.lock().await;
+                        let broadcaster_user_token = broadcaster_user_token.lock().await.clone();
+                        let app_access_token = app_access_token.lock().await.clone();
 
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
 
-                        let Ok(existing_response) = inner_client
-                            .req_get(request, &*broadcaster_user_token)
-                            .await
+                        let Ok(existing_response) =
+                            inner_client.req_get(request, &broadcaster_user_token).await
                         else {
                             continue;
                         };
@@ -818,7 +829,7 @@ impl Bot {
                             );
 
                             let _ = inner_client
-                                .req_patch(request, body, &*broadcaster_user_token)
+                                .req_patch(request, body, &broadcaster_user_token)
                                 .await;
                             continue;
                         };
@@ -837,14 +848,14 @@ impl Bot {
                             .winning_outcome_id(&prediction.id);
 
                             let _ = inner_client
-                                .req_patch(request, body, &*broadcaster_user_token)
+                                .req_patch(request, body, &broadcaster_user_token)
                                 .await;
                             let _ = inner_client
                                 .send_chat_message(
                                     &broadcaster_id,
                                     &response_user_id,
                                     &*format!("Round finished! The result was {}.", outcome),
-                                    &*app_access_token,
+                                    &app_access_token,
                                 )
                                 .await;
 
@@ -864,7 +875,7 @@ impl Bot {
         event: Event,
         timestamp: twitch_api::types::Timestamp,
     ) -> Result<(), eyre::Report> {
-        let bot_app_token = self.bot_app_token.lock().await;
+        let bot_app_token = self.bot_app_token.lock().await.clone();
         match event {
             Event::ChannelChatMessageV1(Payload {
                 message: Message::Notification(payload),

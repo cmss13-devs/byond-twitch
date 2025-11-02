@@ -735,7 +735,7 @@ impl Bot {
 
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-        tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
             let redis_url = redis_url.clone();
 
             let redis_client = match redis::Client::open(redis_url) {

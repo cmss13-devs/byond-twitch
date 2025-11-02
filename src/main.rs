@@ -555,14 +555,14 @@ impl Bot {
                 return;
             };
 
-            let mut every_10 = 0;
+            let mut every_25 = 0;
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                every_10 += 1;
+                every_25 += 1;
 
-                if every_10 > 10 {
-                    let app_token = app_token.lock().await.clone();
+                if every_25 > 25 {
+                    let app_token = app_token.lock().await;
 
                     let options = [
                         "Go to our website at https://cm-ss13.com/play to learn how to get involved in the action!",
@@ -583,7 +583,7 @@ impl Bot {
                             .await;
                     }
 
-                    every_10 = 0;
+                    every_25 = 0;
                 }
 
                 let token = app_token.lock().await.clone();

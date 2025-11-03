@@ -800,11 +800,16 @@ impl Bot {
 
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
-                        let Ok(existing_response_result) =
-                            inner_client.req_get(request, &broadcaster_user_token).await
-                        else {
-                            continue;
-                        };
+
+                        let existing_response_result =
+                            match inner_client.req_get(request, &broadcaster_user_token).await {
+                                Ok(res) => res,
+                                Err(err) => {
+                                    tracing::error!("error getting existing predictions: {err}");
+                                    continue;
+                                }
+                            };
+
                         let existing_response: Vec<get_predictions::Prediction> =
                             existing_response_result.data;
 

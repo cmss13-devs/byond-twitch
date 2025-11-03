@@ -444,7 +444,7 @@ async fn handle_request(
             };
 
             let Ok(hmac): Result<Hmac<Sha256>, _> = Hmac::new_from_slice(&base_64) else {
-                return get_response_with_code("Internal server errorer.", 500);
+                return get_response_with_code("Internal server error.", 500);
             };
 
             let Ok(claim): Result<TwitchExtToken, jwt::Error> =
@@ -714,17 +714,6 @@ impl Bot {
     fn start_redis_websocket(&self, redis_url: &str) -> Result<(), eyre::Report> {
         tracing::info!("connecting to redis");
 
-        let (tx, _) = broadcast::channel::<String>(100);
-
-        let socket_tx = tx.clone();
-        tokio::spawn(async move {
-            let socket_server = server::WebsocketServer::new(
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-                socket_tx,
-            );
-            let _ = socket_server.run().await;
-        });
-
         let redis_url = redis_url.to_string();
 
         let broadcaster_id = self.broadcaster.clone();
@@ -736,34 +725,53 @@ impl Bot {
         let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         tokio::task::spawn_blocking(move || {
-            let redis_url = redis_url.clone();
+            loop {
+                let redis_client = match redis::Client::open(redis_url.clone()) {
+                    Ok(ok) => ok,
+                    Err(err) => {
+                        tracing::error!("could not create redis client: {err}");
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        continue; // Retry connection
+                    }
+                };
 
-            let redis_client = match redis::Client::open(redis_url) {
-                Ok(ok) => ok,
-                Err(err) => {
-                    tracing::error!("could not create redis client: {err}");
-                    return;
+                let mut conn = match redis_client.get_connection() {
+                    Ok(connection) => connection,
+                    Err(err) => {
+                        tracing::error!("failed to get redis connection: {err}");
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        continue;
+                    }
+                };
+
+                let mut pub_sub = conn.as_pubsub();
+
+                if let Err(err) = pub_sub.subscribe(&["byond.round"]) {
+                    tracing::error!("failed to subscribe to channel: {}", err);
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    continue; // Retry subscription
                 }
-            };
 
-            let mut conn = match redis_client.get_connection() {
-                Ok(connection) => connection,
-                Err(err) => {
-                    tracing::error!("failed to get redis connection: {err}");
-                    return;
-                }
-            };
-            let mut pub_sub = conn.as_pubsub();
+                tracing::info!("Successfully connected to Redis pubsub");
 
-            if let Err(err) = pub_sub.subscribe(&["byond.round"]) {
-                tracing::error!("failed to subscribe to channel: {}", err);
-                return;
-            }
-
-            while let Ok(msg) = pub_sub.get_message() {
-                if let Ok(payload) = msg.get_payload::<String>() {
-                    tracing::info!("dispatched payload: {}", &payload);
-                    let _ = msg_tx.send(payload);
+                loop {
+                    match pub_sub.get_message() {
+                        Ok(msg) => {
+                            if let Ok(payload) = msg.get_payload::<String>() {
+                                tracing::info!("dispatched payload: {}", &payload);
+                                if msg_tx.send(payload).is_err() {
+                                    tracing::error!("receiver dropped, exiting redis task");
+                                    return;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!("error receiving message: {err}");
+                            tracing::info!("reconnecting to redis in 5 seconds...");
+                            std::thread::sleep(std::time::Duration::from_secs(5));
+                            break;
+                        }
+                    }
                 }
             }
         });

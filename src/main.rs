@@ -599,12 +599,12 @@ impl Bot {
             };
 
             let mut every_25 = 0;
-            let mut every_100 = -2;
+            let mut every_30 = -2;
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
                 every_25 += 1;
-                every_100 += 1;
+                every_30 += 1;
 
                 if every_25 > 25 {
                     let app_token = app_token.lock().await.clone();
@@ -633,7 +633,7 @@ impl Bot {
 
                 let token = app_token.lock().await.clone();
 
-                if every_100 > 100 || every_100 == -1 {
+                if every_30 > 30 || every_30 == -1 {
                     if let Some(ref discord_token) = discord_token {
                         let local: DateTime<Utc> = Utc::now();
                         let Some(nd) = NaiveDate::from_ymd_opt(local.year(), local.month(), 1)
@@ -681,7 +681,7 @@ impl Bot {
                         let leaderboard_channel = discord_leaderboard_channel.unwrap();
 
                         let discord_http = serenity::http::Http::new(discord_token);
-                        if let Ok(mut messages) = discord_http
+                        if let Ok(messages) = discord_http
                             .get_messages(leaderboard_channel.into(), None, Some(5))
                             .await
                         {
@@ -736,7 +736,7 @@ impl Bot {
                         }
                     }
 
-                    every_100 = 0;
+                    every_30 = 0;
                 }
 
                 let Some(prev_1) = chrono::Utc::now().date_naive().pred_opt() else {

@@ -67,16 +67,21 @@ pub struct Cli {
     pub persist: std::path::PathBuf,
 }
 
-#[derive(serde_derive::Serialize, serde_derive::Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
     byond_host: String,
     comms_key: String,
     response_user_id: String,
-    discord_webhook: Option<String>,
-    discord_token: Option<String>,
-    discord_leaderboard_channel: Option<u64>,
+    discord: Option<DiscordConfig>,
     redis_url: Option<String>,
     twitch_secret: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct DiscordConfig {
+    webhook: String,
+    token: String,
+    leaderboard_channel: u64,
 }
 
 impl Config {
@@ -588,13 +593,11 @@ impl Bot {
         let inner_client = self.client.clone();
         let app_token = self.bot_app_token.clone();
         let published_clips = self.published_clips.clone();
-        let discord_live_clips_webhook = self.config.discord_webhook.clone();
-        let discord_token = self.config.discord_token.clone();
-        let discord_leaderboard_channel = self.config.discord_leaderboard_channel;
+        let discord_config = self.config.discord.clone();
 
         let persist = self.opts.persist.clone();
         tokio::spawn(async move {
-            let Some(discord_live_clips_webhook) = discord_live_clips_webhook else {
+            let Some(discord) = discord_config else {
                 return;
             };
 
@@ -634,109 +637,8 @@ impl Bot {
                 let token = app_token.lock().await.clone();
 
                 if every_30 > 30 || every_30 == -1 {
-                    if let Some(ref discord_token) = discord_token {
-                        let local: DateTime<Utc> = Utc::now();
-                        let Some(nd) = NaiveDate::from_ymd_opt(local.year(), local.month(), 1)
-                        else {
-                            continue;
-                        };
-
-                        let Some(date_time) = nd.and_hms_opt(0, 0, 0) else {
-                            continue;
-                        };
-
-                        let Ok(timestamp) = Timestamp::from_str(
-                            &date_time
-                                .and_utc()
-                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                        ) else {
-                            continue;
-                        };
-
-                        let mut all_clips: Vec<Clip> = Vec::new();
-
-                        let request = helix::clips::GetClipsRequest::broadcaster_id(&broadcaster)
-                            .first(100)
-                            .started_at(&timestamp)
-                            .to_owned();
-
-                        if let Ok(mut responses) = inner_client.req_get(request, &token).await {
-                            for response in responses.data.clone() {
-                                all_clips.push(response);
-                            }
-
-                            while let Ok(Some(next_clip)) =
-                                responses.get_next(&inner_client, &token).await
-                            {
-                                responses = next_clip;
-
-                                for response in responses.data.clone() {
-                                    all_clips.push(response);
-                                }
-                            }
-                        }
-
-                        all_clips.sort_by(|x, y| y.view_count.cmp(&x.view_count));
-
-                        let leaderboard_channel = discord_leaderboard_channel.unwrap();
-
-                        let discord_http = serenity::http::Http::new(discord_token);
-                        if let Ok(messages) = discord_http
-                            .get_messages(leaderboard_channel.into(), None, Some(5))
-                            .await
-                        {
-                            if messages
-                                .iter()
-                                .all(|message| message.content.contains("Place:"))
-                            {
-                                for n in 0..5 {
-                                    let Some(message) = messages.get(n) else {
-                                        continue;
-                                    };
-
-                                    let Some(clip) = all_clips.get(n) else {
-                                        continue;
-                                    };
-
-                                    let _ = discord_http
-                                        .edit_message(
-                                            leaderboard_channel.into(),
-                                            message.id,
-                                            &json!({ "content": format!(
-                                        "## {} Place: {} by {} ({} views)\n\n{}",
-                                        (n+1).to_ordinal_string(), clip.title, clip.creator_name, clip.view_count, clip.url
-                                    ) }),
-                                            Vec::new(),
-                                        )
-                                        .await;
-                                }
-                            }
-                        }
-
-                        let mut wait_interval =
-                            tokio::time::interval(tokio::time::Duration::from_secs(1));
-
-                        for n in (0..5).rev() {
-                            let Some(clip) = all_clips.get(n) else {
-                                continue;
-                            };
-
-                            let _ = discord_http
-                                .send_message(
-                                    leaderboard_channel.into(),
-                                    Vec::new(),
-                                    &json!({ "content": format!(
-                                        "## {} Place: {} by {} ({} views)\n\n{}",
-                                        (n+1).to_ordinal_string(), clip.title, clip.creator_name, clip.view_count, clip.url
-                                    ) }),
-                                )
-                                .await;
-
-                            wait_interval.tick().await;
-                        }
-                    }
-
-                    every_30 = 0;
+                    Bot::handle_clip_leaderboard(&inner_client, &broadcaster, &token, &discord)
+                        .await;
                 }
 
                 let Some(prev_1) = chrono::Utc::now().date_naive().pred_opt() else {
@@ -791,7 +693,7 @@ impl Bot {
                     };
 
                     let _ = request_client
-                        .request(Method::POST, &discord_live_clips_webhook)
+                        .request(Method::POST, &discord.webhook)
                         .body(webhook_str)
                         .header("Content-Type", "application/json")
                         .send()
@@ -827,6 +729,110 @@ impl Bot {
                 }
             }
         });
+    }
+
+    async fn handle_clip_leaderboard(
+        client: &HelixClient<'_, reqwest::Client>,
+        broadcaster: &twitch_api::types::UserId,
+        twitch_app_token: &AppAccessToken,
+        discord: &DiscordConfig,
+    ) {
+        let local: DateTime<Utc> = Utc::now();
+        let Some(nd) = NaiveDate::from_ymd_opt(local.year(), local.month(), 1) else {
+            return;
+        };
+
+        let Some(date_time) = nd.and_hms_opt(0, 0, 0) else {
+            return;
+        };
+
+        let Ok(timestamp) = Timestamp::from_str(
+            &date_time
+                .and_utc()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ) else {
+            return;
+        };
+
+        let mut all_clips: Vec<Clip> = Vec::new();
+
+        let request = helix::clips::GetClipsRequest::broadcaster_id(broadcaster)
+            .first(100)
+            .started_at(&timestamp)
+            .to_owned();
+
+        if let Ok(mut responses) = client.req_get(request, twitch_app_token).await {
+            for response in responses.data.clone() {
+                all_clips.push(response);
+            }
+
+            while let Ok(Some(next_clip)) = responses.get_next(client, twitch_app_token).await {
+                responses = next_clip;
+
+                for response in responses.data.clone() {
+                    all_clips.push(response);
+                }
+            }
+        }
+
+        all_clips.sort_by(|x, y| y.view_count.cmp(&x.view_count));
+
+        let leaderboard_channel = discord.leaderboard_channel;
+
+        let discord_http = serenity::http::Http::new(&discord.token);
+        if let Ok(messages) = discord_http
+            .get_messages(leaderboard_channel.into(), None, Some(5))
+            .await
+        {
+            if messages
+                .iter()
+                .all(|message| message.content.contains("Place:"))
+            {
+                for n in 0..5 {
+                    let Some(message) = messages.get(n) else {
+                        continue;
+                    };
+
+                    let Some(clip) = all_clips.get(n) else {
+                        continue;
+                    };
+
+                    let _ = discord_http.edit_message(
+                            leaderboard_channel.into(),
+                            message.id,
+                            &json!({ "content": format!(
+                        "## {} Place: {} by {} ({} views)\n\n{}",
+                        (n+1).to_ordinal_string(), clip.title, clip.creator_name, clip.view_count, clip.url
+                    ) }),
+                            Vec::new(),
+                        )
+                        .await;
+                }
+
+                return;
+            }
+        }
+
+        let mut wait_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+        for n in (0..5).rev() {
+            let Some(clip) = all_clips.get(n) else {
+                continue;
+            };
+
+            let _ = discord_http
+                                .send_message(
+                                    leaderboard_channel.into(),
+                                    Vec::new(),
+                                    &json!({ "content": format!(
+                                        "## {} Place: {} by {} ({} views)\n\n{}",
+                                        (n+1).to_ordinal_string(), clip.title, clip.creator_name, clip.view_count, clip.url
+                                    ) }),
+                                )
+                                .await;
+
+            wait_interval.tick().await;
+        }
     }
 
     #[tracing::instrument(skip_all)]

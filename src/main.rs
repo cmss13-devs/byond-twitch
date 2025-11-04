@@ -462,8 +462,12 @@ async fn handle_request(
 
             received.pop();
 
-            let Ok(game_response) = serde_json::from_str::<GameResponse>(&received) else {
-                return get_response_with_code("An error occured deserializing data!", 501);
+            let game_response = match serde_json::from_str::<GameResponse>(&received) {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::error!(err = ?err, "failed to deserialize game response");
+                    return get_response_with_code("An error occured deserializing data!", 501);
+                }
             };
 
             let Ok(response) = Response::builder()

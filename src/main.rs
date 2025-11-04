@@ -1327,6 +1327,7 @@ struct GameResponse {
 struct Player {
     name: String,
     job: String,
+    background: String,
 }
 
 #[derive(serde::Serialize)]

@@ -640,28 +640,31 @@ impl Bot {
 
             loop {
                 interval.tick().await;
-                let mut token = token.lock().await.clone();
+                let mut inner_token = token.lock().await.clone();
 
-                tracing::info!("token expires in {}", token.expires_in().as_secs());
-
-                if token.expires_in() < std::time::Duration::from_secs(60) {
+                if inner_token.expires_in() < std::time::Duration::from_secs(60) {
                     tracing::info!("refreshing token...");
-                    token
+                    inner_token
                         .refresh_token(&self.client)
                         .await
                         .wrap_err("couldn't refresh token")?;
+                    let mut relocked = token.lock().await;
+                    *relocked = inner_token;
                     tracing::info!(
                         "refreshed token successfully, now {:?}",
-                        token.expires_in().as_secs()
+                        inner_token.expires_in().as_secs()
                     );
                 }
-                if token
+                if inner_token
                     .validate_token(&client)
                     .await
                     .wrap_err("couldn't validate token")
                     .is_err()
                 {
-                    let _ = token.refresh_token(&self.client).await;
+                    let _ = inner_token.refresh_token(&self.client).await;
+                    let mut relocked = token.lock().await;
+                    *relocked = inner_token;
+
                     tracing::info!("refreshed token after failed to validate token");
                 }
             }

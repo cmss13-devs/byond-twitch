@@ -42,7 +42,9 @@ use tokio::sync::Mutex;
 use twitch_api::helix;
 use twitch_api::helix::predictions::create_prediction::{self, NewPredictionOutcome};
 use twitch_api::helix::predictions::{end_prediction, get_predictions};
-use twitch_api::twitch_oauth2::{self, AppAccessToken, Scope, TwitchToken as _, UserToken};
+use twitch_api::twitch_oauth2::{
+    self, AppAccessToken, ClientId, ClientSecret, Scope, TwitchToken as _, UserToken,
+};
 use twitch_api::types::{PredictionStatus, Timestamp};
 use twitch_api::{
     client::ClientDefault,
@@ -53,13 +55,6 @@ use twitch_api::{
 #[derive(Parser, Debug, Clone)]
 #[clap(about, version)]
 pub struct Cli {
-    /// Client ID of twitch application
-    #[clap(long, env, hide_env = true)]
-    pub client_id: twitch_api::twitch_oauth2::ClientId,
-    /// Client secret of twitch application
-    #[clap(long, env, hide_env = true)]
-    pub client_secret: twitch_api::twitch_oauth2::ClientSecret,
-    #[clap(long, env, hide_env = true)]
     pub broadcaster_login: twitch_api::types::UserName,
     /// Path to config file
     #[clap(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/config.toml"))]
@@ -71,12 +66,24 @@ pub struct Cli {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
-    byond_host: String,
-    comms_key: String,
-    response_user_id: String,
+    twitch: TwitchConfig,
+    game: GameConfig,
     discord: Option<DiscordConfig>,
     redis_url: Option<String>,
-    twitch_secret: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct TwitchConfig {
+    client_id: ClientId,
+    client_secret: ClientSecret,
+    api_secret: Option<String>,
+    response_user_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct GameConfig {
+    host: String,
+    comms_key: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -110,12 +117,11 @@ async fn main() -> Result<(), eyre::Report> {
     let opts = Cli::parse();
     let config = Config::load(&opts.config)?;
 
-    let byond_host = config.byond_host.clone();
-    let comms_key = config.comms_key.clone();
-    let twitch_key = config.twitch_secret.clone();
+    let game_config = config.game.clone();
+    let twitch_key = config.twitch.api_secret.clone();
 
     tokio::spawn(async move {
-        let _ = start_webserver(byond_host, comms_key, twitch_key).await;
+        let _ = start_webserver(game_config, twitch_key).await;
     });
 
     let client: HelixClient<reqwest::Client> = twitch_api::HelixClient::with_client(
@@ -141,8 +147,8 @@ async fn main() -> Result<(), eyre::Report> {
                     &client,
                     tokens[0].into(),
                     tokens[1].into(),
-                    opts.client_id.clone(),
-                    Some(opts.client_secret.clone()),
+                    config.twitch.client_id.clone(),
+                    Some(config.twitch.client_secret.clone()),
                 )
                 .await?,
             );
@@ -151,10 +157,10 @@ async fn main() -> Result<(), eyre::Report> {
 
     if broadcaster_user_token.is_none() {
         let mut builder = twitch_api::twitch_oauth2::tokens::DeviceUserTokenBuilder::new(
-            opts.client_id.clone(),
+            config.twitch.client_id.clone(),
             vec![Scope::UserReadChat, Scope::ChannelManagePredictions],
         );
-        builder.set_secret(Some(opts.client_secret.clone()));
+        builder.set_secret(Some(config.twitch.client_secret.clone()));
         let code = builder.start(&client).await?;
         println!("Please go to: {}", code.verification_uri);
         broadcaster_user_token = Some(builder.wait_for_code(&client, tokio::time::sleep).await?);
@@ -181,8 +187,8 @@ async fn main() -> Result<(), eyre::Report> {
 
     let bot_app_token = AppAccessToken::get_app_access_token(
         &Client::builder().redirect(Policy::none()).build()?,
-        opts.client_id.clone(),
-        opts.client_secret.clone(),
+        config.twitch.client_id.clone(),
+        config.twitch.client_secret.clone(),
         vec![Scope::UserWriteChat, Scope::UserBot, Scope::ChannelBot],
     )
     .await?;
@@ -240,8 +246,7 @@ struct RedisRoundEvent {
 }
 
 async fn start_webserver(
-    byond_host: String,
-    comms_key: String,
+    config: GameConfig,
     twitch_secret: Option<String>,
 ) -> Result<(), eyre::Report> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
@@ -254,10 +259,10 @@ async fn start_webserver(
 
         let io = TokioIo::new(stream);
 
-        let byond_host = byond_host.clone();
-        let comms_key = comms_key.clone();
-        let role_icons = role_icons.clone();
+        let config = config.clone();
         let twitch_secret = twitch_secret.clone();
+
+        let role_icons = role_icons.clone();
 
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -266,8 +271,7 @@ async fn start_webserver(
                     service_fn(move |req| {
                         handle_request(
                             req,
-                            byond_host.clone(),
-                            comms_key.clone(),
+                            config.clone(),
                             role_icons.clone(),
                             twitch_secret.clone(),
                         )
@@ -314,8 +318,7 @@ struct TwitchExtToken {
 
 async fn handle_request(
     request: Request<hyper::body::Incoming>,
-    byond_host: String,
-    comms_key: String,
+    config: GameConfig,
     request_cache: Arc<Mutex<RequestCache>>,
     twitch_secret: Option<String>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
@@ -348,7 +351,7 @@ async fn handle_request(
                     return get_response_with_code("Internal server error.", 501);
                 };
 
-                if deserialised_body.auth_key != comms_key {
+                if deserialised_body.auth_key != config.comms_key {
                     return get_response_with_code("Invalid comms key!", 401);
                 }
 
@@ -392,13 +395,13 @@ async fn handle_request(
 
             let Ok(query) = serde_json::to_string(&GameRequest {
                 query: "active_mobs".to_string(),
-                auth: Some(comms_key),
+                auth: Some(config.comms_key),
                 source: "byond-twitch-web".to_string(),
             }) else {
                 return get_response_with_code("An error occured preparing to fetch data!", 501);
             };
 
-            let Ok(mut address) = byond_host.to_socket_addrs() else {
+            let Ok(mut address) = config.host.to_socket_addrs() else {
                 return get_response_with_code("Internal server error.", 501);
             };
 
@@ -478,7 +481,7 @@ async fn handle_request(
 
             let Ok(query) = serde_json::to_string(&GameCMTVCommand {
                 query: "cmtv".to_string(),
-                auth: Some(comms_key),
+                auth: Some(config.comms_key),
                 source: "byond-twitch-web".to_string(),
                 command: "follow".to_string(),
                 args: request.name,
@@ -489,7 +492,7 @@ async fn handle_request(
                 return get_response_with_code("An error occured preparing to fetch data!", 501);
             };
 
-            let Ok(mut address) = byond_host.to_socket_addrs() else {
+            let Ok(mut address) = config.host.to_socket_addrs() else {
                 return get_response_with_code("Internal server error.", 501);
             };
 
@@ -596,7 +599,7 @@ impl Bot {
         tracing::info!("starting api loop...");
 
         let broadcaster = self.broadcaster.clone();
-        let sender_id = self.config.response_user_id.clone();
+        let sender_id = self.config.twitch.response_user_id.clone();
         let inner_client = self.client.clone();
         let app_token = self.bot_app_token.clone();
         let published_clips = self.published_clips.clone();
@@ -862,7 +865,7 @@ impl Bot {
         let inner_client = self.client.clone();
         let broadcaster_user_token = self.broadcaster_user_token.clone();
         let app_access_token = self.bot_app_token.clone();
-        let response_user_id = self.config.response_user_id.clone();
+        let response_user_id = self.config.twitch.response_user_id.clone();
 
         tokio::spawn(async move {
             let redis_client = match redis::Client::open(redis_url.clone()) {
@@ -1091,12 +1094,12 @@ impl Bot {
                 if JOIN_REGEX
                     .find(&payload.message.text.to_lowercase())
                     .is_some()
-                    && payload.chatter_user_id.as_str() != &*self.config.response_user_id
+                    && payload.chatter_user_id.as_str() != &*self.config.twitch.response_user_id
                 {
                     let _ = self.client
                         .send_chat_message_reply(
                             &subscription.condition.broadcaster_user_id,
-                            &self.config.response_user_id,
+                            &self.config.twitch.response_user_id,
                             &payload.message_id,
                             "Wanting to join the game? Download BYOND at https://www.byond.com/download and head to https://cm-ss13.com/play/main to get involved!",
                             &bot_app_token,
@@ -1172,12 +1175,12 @@ impl Bot {
             username: Some(payload.chatter_user_login.to_string()),
             user_id: payload.chatter_user_id.to_string(),
             is_moderator,
-            auth: Some(self.config.comms_key.clone()),
+            auth: Some(self.config.game.comms_key.clone()),
             args: rest.to_string(),
             source: "byond-twitch".to_string(),
         })?;
 
-        let Some(address) = &self.config.byond_host.to_socket_addrs()?.next() else {
+        let Some(address) = &self.config.game.host.to_socket_addrs()?.next() else {
             return Err(eyre!("Could not locate address for BYOND host"));
         };
 
@@ -1193,7 +1196,7 @@ impl Bot {
             .client
             .send_chat_message_reply(
                 &subscription.condition.broadcaster_user_id,
-                &self.config.response_user_id,
+                &self.config.twitch.response_user_id,
                 &payload.message_id,
                 &*response.response,
                 token,

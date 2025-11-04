@@ -1330,8 +1330,8 @@ struct GameResponse {
 #[derive(Deserialize, Serialize, Clone)]
 struct Player {
     name: String,
-    job: String,
-    background: String,
+    job: Option<String>,
+    background: Option<String>,
 }
 
 #[derive(serde::Serialize)]

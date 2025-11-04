@@ -10,6 +10,7 @@ use eyre::eyre;
 use futures::StreamExt;
 use hmac::{Hmac, Mac};
 use ordinal::ToOrdinal;
+use regex::Regex;
 use serde_json::json;
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -17,7 +18,7 @@ use std::convert::Infallible;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use twitch_api::helix::clips::Clip;
 
 use chrono::Datelike;
@@ -601,13 +602,18 @@ impl Bot {
                 return;
             };
 
-            let mut every_25 = 0;
-            let mut every_30 = -2;
+            let mut every_25 = -2;
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
                 every_25 += 1;
-                every_30 += 1;
+
+                let token = app_token.lock().await.clone();
+
+                if every_25 > 25 || every_25 == -1 {
+                    Bot::handle_clip_leaderboard(&inner_client, &broadcaster, &token, &discord)
+                        .await;
+                }
 
                 if every_25 > 25 {
                     let app_token = app_token.lock().await.clone();
@@ -632,13 +638,6 @@ impl Bot {
                     }
 
                     every_25 = 0;
-                }
-
-                let token = app_token.lock().await.clone();
-
-                if every_30 > 30 || every_30 == -1 {
-                    Bot::handle_clip_leaderboard(&inner_client, &broadcaster, &token, &discord)
-                        .await;
                 }
 
                 let Some(prev_1) = chrono::Utc::now().date_naive().pred_opt() else {
@@ -1070,6 +1069,22 @@ impl Bot {
                     "[{}] {}: {}",
                     timestamp, payload.chatter_user_name, payload.message.text
                 );
+
+                if JOIN_REGEX
+                    .find(&payload.message.text.to_lowercase())
+                    .is_some()
+                {
+                    let _ = self.client
+                        .send_chat_message_reply(
+                            &subscription.condition.broadcaster_user_id,
+                            &self.config.response_user_id,
+                            &payload.message_id,
+                            "Wanting to get join the game? Download BYOND at https://www.byond.com/download and head to https://cm-ss13.com/play/main to get involved!",
+                            &bot_app_token,
+                        )
+                        .await;
+                }
+
                 if let Some(full_command) = payload.message.text.strip_prefix("!") {
                     let mut split_whitespace = full_command.split_whitespace();
 
@@ -1169,6 +1184,9 @@ impl Bot {
         Ok(())
     }
 }
+
+static JOIN_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([dt]o).*join|(can\si\sjoin)").unwrap());
 
 #[derive(serde::Serialize)]
 struct GameRequest {

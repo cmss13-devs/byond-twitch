@@ -5,10 +5,11 @@ pub mod server;
 pub mod websocket;
 
 use base64::Engine;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use eyre::eyre;
 use futures::StreamExt;
 use hmac::{Hmac, Mac};
+use serde_json::json;
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -16,7 +17,9 @@ use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
+use twitch_api::helix::clips::Clip;
 
+use chrono::Datelike;
 use clap::Parser;
 use eyre::WrapErr as _;
 use http2byond::ByondTopicValue;
@@ -69,6 +72,8 @@ pub struct Config {
     comms_key: String,
     response_user_id: String,
     discord_webhook: Option<String>,
+    discord_token: Option<String>,
+    discord_leaderboard_channel: Option<u64>,
     redis_url: Option<String>,
     twitch_secret: Option<String>,
 }
@@ -582,18 +587,23 @@ impl Bot {
         let inner_client = self.client.clone();
         let app_token = self.bot_app_token.clone();
         let published_clips = self.published_clips.clone();
-        let webhook = self.config.discord_webhook.clone();
+        let discord_live_clips_webhook = self.config.discord_webhook.clone();
+        let discord_token = self.config.discord_token.clone();
+        let discord_leaderboard_channel = self.config.discord_leaderboard_channel;
+
         let persist = self.opts.persist.clone();
         tokio::spawn(async move {
-            let Some(webhook) = webhook else {
+            let Some(discord_live_clips_webhook) = discord_live_clips_webhook else {
                 return;
             };
 
             let mut every_25 = 0;
+            let mut every_100 = -2;
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
                 every_25 += 1;
+                every_100 += 1;
 
                 if every_25 > 25 {
                     let app_token = app_token.lock().await.clone();
@@ -621,6 +631,114 @@ impl Bot {
                 }
 
                 let token = app_token.lock().await.clone();
+
+                if every_100 > 100 || every_100 == -1 {
+                    if let Some(ref discord_token) = discord_token {
+                        let local: DateTime<Utc> = Utc::now();
+                        let Some(nd) = NaiveDate::from_ymd_opt(local.year(), local.month(), 1)
+                        else {
+                            continue;
+                        };
+
+                        let Some(date_time) = nd.and_hms_opt(0, 0, 0) else {
+                            continue;
+                        };
+
+                        let Ok(timestamp) = Timestamp::from_str(
+                            &date_time
+                                .and_utc()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        ) else {
+                            continue;
+                        };
+
+                        let mut all_clips: Vec<Clip> = Vec::new();
+
+                        let request = helix::clips::GetClipsRequest::broadcaster_id(&broadcaster)
+                            .first(100)
+                            .started_at(&timestamp)
+                            .to_owned();
+
+                        if let Ok(mut responses) = inner_client.req_get(request, &token).await {
+                            for response in responses.data.clone() {
+                                all_clips.push(response);
+                            }
+
+                            while let Ok(Some(next_clip)) =
+                                responses.get_next(&inner_client, &token).await
+                            {
+                                responses = next_clip;
+
+                                for response in responses.data.clone() {
+                                    all_clips.push(response);
+                                }
+                            }
+                        }
+
+                        all_clips.sort_by(|x, y| x.view_count.cmp(&y.view_count));
+
+                        let leaderboard_channel = discord_leaderboard_channel.unwrap();
+
+                        let discord_http = serenity::http::Http::new(discord_token);
+                        if let Ok(mut messages) = discord_http
+                            .get_messages(leaderboard_channel.into(), None, Some(5))
+                            .await
+                        {
+                            if messages
+                                .iter()
+                                .all(|message| message.content.contains("Clip by"))
+                            {
+                                messages.reverse();
+
+                                for n in 0..5 {
+                                    let Some(message) = messages.get(n) else {
+                                        continue;
+                                    };
+
+                                    let Some(clip) = all_clips.get(n) else {
+                                        continue;
+                                    };
+
+                                    let _ = discord_http
+                                        .edit_message(
+                                            leaderboard_channel.into(),
+                                            message.id,
+                                            &json!({ "content": format!(
+                                        "## Clip by {} ({} views)\n\n{}",
+                                        clip.creator_name, clip.view_count, clip.url
+                                    ) }),
+                                            Vec::new(),
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+
+                        let mut wait_interval =
+                            tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+                        for n in 0..5 {
+                            let Some(clip) = all_clips.get(n) else {
+                                continue;
+                            };
+
+                            let _ = discord_http
+                                .send_message(
+                                    leaderboard_channel.into(),
+                                    Vec::new(),
+                                    &json!({ "content": format!(
+                                        "## Clip by {} ({} views)\n\n{}",
+                                        clip.creator_name, clip.view_count, clip.url
+                                    ) }),
+                                )
+                                .await;
+
+                            wait_interval.tick().await;
+                        }
+                    }
+
+                    every_100 = 0;
+                }
 
                 let Some(prev_1) = chrono::Utc::now().date_naive().pred_opt() else {
                     continue;
@@ -674,7 +792,7 @@ impl Bot {
                     };
 
                     let _ = request_client
-                        .request(Method::POST, &webhook)
+                        .request(Method::POST, &discord_live_clips_webhook)
                         .body(webhook_str)
                         .header("Content-Type", "application/json")
                         .send()
@@ -753,7 +871,6 @@ impl Bot {
                     tracing::error!("unable to get payload as string");
                     continue;
                 };
-                tracing::info!("received payload: {}", &unwrapped);
 
                 let Ok(deserialized) = serde_json::from_str::<RedisRoundEvent>(&unwrapped) else {
                     tracing::info!("could not deserialise");

@@ -9,6 +9,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use eyre::eyre;
 use futures::StreamExt;
 use hmac::{Hmac, Mac};
+use ordinal::ToOrdinal;
 use serde_json::json;
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -704,8 +705,8 @@ impl Bot {
                                             leaderboard_channel.into(),
                                             message.id,
                                             &json!({ "content": format!(
-                                        "## Clip by {} ({} views)\n\n{}",
-                                        clip.creator_name, clip.view_count, clip.url
+                                        "## {} Place: {} by {} ({} views)\n\n{}",
+                                        (n+1).to_ordinal_string(), clip.title, clip.creator_name, clip.view_count, clip.url
                                     ) }),
                                             Vec::new(),
                                         )
@@ -727,8 +728,8 @@ impl Bot {
                                     leaderboard_channel.into(),
                                     Vec::new(),
                                     &json!({ "content": format!(
-                                        "## Clip by {} ({} views)\n\n{}",
-                                        clip.creator_name, clip.view_count, clip.url
+                                        "## {} Place: {} by {} ({} views)\n\n{}",
+                                        (n+1).to_ordinal_string(), clip.title, clip.creator_name, clip.view_count, clip.url
                                     ) }),
                                 )
                                 .await;

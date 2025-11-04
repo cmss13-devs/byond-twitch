@@ -205,6 +205,7 @@ dependencies = [
  "hyper 1.7.0",
  "hyper-util",
  "jwt",
+ "ordinal",
  "rand 0.9.2",
  "redis",
  "reqwest 0.12.23",
@@ -1453,6 +1454,12 @@ dependencies = [
  "pkg-config",
  "vcpkg",
 ]
+
+[[package]]
+name = "ordinal"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04f7ff16c3a0599da7939ad0ae9300414ca1115a7f552574bb269638a1e0576d"
 
 [[package]]
 name = "owo-colors"

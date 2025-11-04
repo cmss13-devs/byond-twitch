@@ -637,16 +637,23 @@ impl Bot {
             // We check constantly if the token is valid.
             // We also need to refresh the token if it's about to be expired.
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+
             loop {
                 interval.tick().await;
                 let mut token = token.lock().await.clone();
+
+                tracing::info!("token expires in {}", token.expires_in().as_secs());
+
                 if token.expires_in() < std::time::Duration::from_secs(60) {
-                    tracing::info!("token expires at {:?}, refreshing...", token.expires_in());
+                    tracing::info!("refreshing token...");
                     token
                         .refresh_token(&self.client)
                         .await
                         .wrap_err("couldn't refresh token")?;
-                    tracing::info!("refreshed token successfully, now {:?}", token.expires_in());
+                    tracing::info!(
+                        "refreshed token successfully, now {:?}",
+                        token.expires_in().as_secs()
+                    );
                 }
                 if token
                     .validate_token(&client)

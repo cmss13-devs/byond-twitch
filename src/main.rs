@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use tracing::instrument;
@@ -216,6 +217,7 @@ async fn main() -> Result<(), eyre::Report> {
     let webserver_token = bot_app_token.clone();
     let response_user_id = config.twitch.response_user_id.clone();
     let webserver_broadcaster = broadcaster.clone();
+    let persist = opts.persist.clone();
     tokio::spawn(async move {
         let _ = start_webserver(
             game_config,
@@ -223,6 +225,7 @@ async fn main() -> Result<(), eyre::Report> {
             webserver_token,
             response_user_id,
             webserver_broadcaster,
+            persist,
         )
         .await;
     });
@@ -261,11 +264,20 @@ async fn start_webserver(
     app_token: Arc<Mutex<AppAccessToken>>,
     responder_user_id: String,
     broadcaster_user_id: UserId,
+    persist: PathBuf,
 ) -> Result<(), eyre::Report> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     let listener = TcpListener::bind(addr).await?;
 
     let cache = Arc::new(Mutex::new(RequestCache::default()));
+    if tokio::fs::try_exists(persist.join("cache.json")).await? {
+        let cache_string = tokio::fs::read_to_string(persist.join("cache.json")).await?;
+
+        let icons = serde_json::from_str::<HashMap<String, String>>(&cache_string)?;
+
+        cache.lock().await.role_icons = icons;
+    }
+
     loop {
         let (stream, _) = listener.accept().await?;
 
@@ -276,6 +288,8 @@ async fn start_webserver(
         let app_access_token = app_token.clone();
         let responder_user_id = responder_user_id.clone();
         let broadcaster_user_id = broadcaster_user_id.clone();
+
+        let persist = persist.clone();
 
         let cache = cache.clone();
 
@@ -292,6 +306,7 @@ async fn start_webserver(
                             app_access_token.clone(),
                             responder_user_id.clone(),
                             broadcaster_user_id.clone(),
+                            persist.clone(),
                         )
                     }),
                 )
@@ -334,6 +349,7 @@ struct TwitchExtToken {
     is_unlinked: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     request: Request<hyper::body::Incoming>,
     config: GameConfig,
@@ -342,6 +358,7 @@ async fn handle_request(
     app_token: Arc<Mutex<AppAccessToken>>,
     responder_user_id: String,
     broadcaster_user_id: UserId,
+    persist: PathBuf,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     match request.uri().path() {
         "/role_icons" => match *request.method() {
@@ -382,6 +399,14 @@ async fn handle_request(
                 for (key, value) in &deserialised_body.role_icons {
                     locked.role_icons.insert(key.to_owned(), value.to_owned());
                 }
+
+                let _ = tokio::fs::write(
+                    persist.join("cache.json"),
+                    serde_json::to_string(&deserialised_body.role_icons)
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .await;
 
                 get_response_with_code("Accepted.", 200)
             }

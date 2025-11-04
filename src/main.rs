@@ -741,7 +741,11 @@ impl Bot {
                 }
             };
             let (mut sink, mut stream) = pubsub.split();
-            sink.subscribe(&["byond.round"]).await;
+
+            if let Err(err) = sink.subscribe(&["byond.round"]).await {
+                tracing::error!(err = ?err, "unable to subscribe on pubsub");
+                return;
+            }
 
             tracing::info!("connected to redis");
             while let Some(unwrapped) = stream.next().await {

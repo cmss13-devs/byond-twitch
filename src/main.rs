@@ -1085,7 +1085,7 @@ impl Bot {
                             &subscription.condition.broadcaster_user_id,
                             &self.config.response_user_id,
                             &payload.message_id,
-                            "Wanting to get join the game? Download BYOND at https://www.byond.com/download and head to https://cm-ss13.com/play/main to get involved!",
+                            "Wanting to join the game? Download BYOND at https://www.byond.com/download and head to https://cm-ss13.com/play/main to get involved!",
                             &bot_app_token,
                         )
                         .await;

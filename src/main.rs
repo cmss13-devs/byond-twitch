@@ -687,10 +687,8 @@ impl Bot {
                         {
                             if messages
                                 .iter()
-                                .all(|message| message.content.contains("Clip by"))
+                                .all(|message| message.content.contains("Place:"))
                             {
-                                messages.reverse();
-
                                 for n in 0..5 {
                                     let Some(message) = messages.get(n) else {
                                         continue;
@@ -718,7 +716,7 @@ impl Bot {
                         let mut wait_interval =
                             tokio::time::interval(tokio::time::Duration::from_secs(1));
 
-                        for n in 0..5 {
+                        for n in (0..5).rev() {
                             let Some(clip) = all_clips.get(n) else {
                                 continue;
                             };

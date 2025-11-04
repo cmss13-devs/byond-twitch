@@ -649,11 +649,13 @@ impl Bot {
                         .await
                         .wrap_err("couldn't refresh token")?;
                     let mut relocked = token.lock().await;
-                    *relocked = inner_token;
                     tracing::info!(
                         "refreshed token successfully, now {:?}",
                         inner_token.expires_in().as_secs()
                     );
+                    *relocked = inner_token;
+
+                    inner_token = token.lock().await.clone();
                 }
                 if inner_token
                     .validate_token(&client)

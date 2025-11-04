@@ -44,7 +44,7 @@ use twitch_api::helix;
 use twitch_api::helix::predictions::create_prediction::{self, NewPredictionOutcome};
 use twitch_api::helix::predictions::{end_prediction, get_predictions};
 use twitch_api::twitch_oauth2::{
-    self, AppAccessToken, ClientId, ClientSecret, Scope, TwitchToken as _, UserToken,
+    self, AppAccessToken, ClientId, ClientSecret, Scope, TwitchToken, UserToken,
 };
 use twitch_api::types::{PredictionStatus, Timestamp, UserId};
 use twitch_api::{
@@ -641,11 +641,12 @@ impl Bot {
                 interval.tick().await;
                 let mut token = token.lock().await.clone();
                 if token.expires_in() < std::time::Duration::from_secs(60) {
+                    tracing::info!("token expires at {:?}, refreshing...", token.expires_in());
                     token
                         .refresh_token(&self.client)
                         .await
                         .wrap_err("couldn't refresh token")?;
-                    tracing::info!("refreshed token successfully");
+                    tracing::info!("refreshed token successfully, now {:?}", token.expires_in());
                 }
                 if token
                     .validate_token(&client)

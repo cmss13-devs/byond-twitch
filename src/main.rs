@@ -611,7 +611,6 @@ impl Bot {
             let mut every_25 = -2;
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
-                interval.tick().await;
                 every_25 += 1;
 
                 let token = app_token.lock().await.clone();
@@ -732,6 +731,8 @@ impl Bot {
                     let _ =
                         tokio::fs::write(persist.join("published.txt"), our_clips.join("|")).await;
                 }
+
+                interval.tick().await;
             }
         });
     }

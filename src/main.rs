@@ -675,7 +675,7 @@ impl Bot {
                             }
                         }
 
-                        all_clips.sort_by(|x, y| x.view_count.cmp(&y.view_count));
+                        all_clips.sort_by(|x, y| y.view_count.cmp(&x.view_count));
 
                         let leaderboard_channel = discord_leaderboard_channel.unwrap();
 

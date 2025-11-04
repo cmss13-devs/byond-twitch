@@ -1204,16 +1204,18 @@ impl Bot {
 
         let response = serde_json::from_str::<GameResponse>(&received)?;
 
-        let _ = self
-            .client
-            .send_chat_message_reply(
-                &subscription.condition.broadcaster_user_id,
-                &self.config.twitch.response_user_id,
-                &payload.message_id,
-                &*response.response,
-                token,
-            )
-            .await;
+        if response.statuscode == 200 {
+            let _ = self
+                .client
+                .send_chat_message_reply(
+                    &subscription.condition.broadcaster_user_id,
+                    &self.config.twitch.response_user_id,
+                    &payload.message_id,
+                    &*response.response,
+                    token,
+                )
+                .await;
+        }
 
         Ok(())
     }

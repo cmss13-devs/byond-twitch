@@ -573,10 +573,15 @@ impl Bot {
                         .wrap_err("couldn't refresh token")?;
                     tracing::info!("refreshed token successfully");
                 }
-                token
+                if token
                     .validate_token(&client)
                     .await
-                    .wrap_err("couldn't validate token")?;
+                    .wrap_err("couldn't validate token")
+                    .is_err()
+                {
+                    let _ = token.refresh_token(&self.client).await;
+                    tracing::info!("refreshed token after failed to validate token");
+                }
             }
             #[allow(unreachable_code)]
             Ok(())
@@ -1073,6 +1078,7 @@ impl Bot {
                 if JOIN_REGEX
                     .find(&payload.message.text.to_lowercase())
                     .is_some()
+                    && payload.chatter_user_id.as_str() != &*self.config.response_user_id
                 {
                     let _ = self.client
                         .send_chat_message_reply(

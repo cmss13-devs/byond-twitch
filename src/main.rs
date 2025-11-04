@@ -19,6 +19,7 @@ use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
+use tracing::instrument;
 use twitch_api::helix::clips::Clip;
 
 use chrono::Datelike;
@@ -735,18 +736,23 @@ impl Bot {
         });
     }
 
+    #[instrument(skip_all)]
     async fn handle_clip_leaderboard(
         client: &HelixClient<'_, reqwest::Client>,
         broadcaster: &twitch_api::types::UserId,
         twitch_app_token: &AppAccessToken,
         discord: &DiscordConfig,
     ) {
+        tracing::info!("beginning update of leaderboard");
+
         let local: DateTime<Utc> = Utc::now();
         let Some(nd) = NaiveDate::from_ymd_opt(local.year(), local.month(), 1) else {
+            tracing::warn!("failed to create date from year/month");
             return;
         };
 
         let Some(date_time) = nd.and_hms_opt(0, 0, 0) else {
+            tracing::warn!("failed to create date/time");
             return;
         };
 
@@ -755,6 +761,7 @@ impl Bot {
                 .and_utc()
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         ) else {
+            tracing::warn!("could not convert date to rfc3339 string");
             return;
         };
 
@@ -794,10 +801,12 @@ impl Bot {
             {
                 for n in 0..5 {
                     let Some(message) = messages.get(n) else {
+                        tracing::warn!("no message when there should be");
                         continue;
                     };
 
                     let Some(clip) = all_clips.get(n) else {
+                        tracing::warn!("no clip when there should be");
                         continue;
                     };
 
@@ -813,6 +822,7 @@ impl Bot {
                         .await;
                 }
 
+                tracing::info!("updated existing messages");
                 return;
             }
         }
@@ -837,6 +847,8 @@ impl Bot {
 
             wait_interval.tick().await;
         }
+
+        tracing::info!("posted new messages");
     }
 
     #[tracing::instrument(skip_all)]

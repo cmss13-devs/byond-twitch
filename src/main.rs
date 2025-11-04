@@ -809,18 +809,24 @@ impl Bot {
                         continue;
                     };
 
-                    let Some(clip) = all_clips.get(n) else {
-                        tracing::warn!("no clip when there should be");
-                        continue;
+                    let format_string = if let Some(clip) = all_clips.get(n) {
+                        format!(
+                            "## {} Place: {} by {} ({} views)\n\n{}",
+                            (n + 1).to_ordinal_string(),
+                            clip.title,
+                            clip.creator_name,
+                            clip.view_count,
+                            clip.url
+                        )
+                    } else {
+                        format!("## {} Place: No clip yet!", (n + 1).to_ordinal_string())
                     };
 
-                    let _ = discord_http.edit_message(
+                    let _ = discord_http
+                        .edit_message(
                             leaderboard_channel.into(),
                             message.id,
-                            &json!({ "content": format!(
-                        "## {} Place: {} by {} ({} views)\n\n{}",
-                        (n+1).to_ordinal_string(), clip.title, clip.creator_name, clip.view_count, clip.url
-                    ) }),
+                            &json!({ "content": format_string }),
                             Vec::new(),
                         )
                         .await;
@@ -834,20 +840,26 @@ impl Bot {
         let mut wait_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
         for n in (0..5).rev() {
-            let Some(clip) = all_clips.get(n) else {
-                continue;
+            let format_string = if let Some(clip) = all_clips.get(n) {
+                format!(
+                    "## {} Place: {} by {} ({} views)\n\n{}",
+                    (n + 1).to_ordinal_string(),
+                    clip.title,
+                    clip.creator_name,
+                    clip.view_count,
+                    clip.url
+                )
+            } else {
+                format!("## {} Place: No clip yet!", (n + 1).to_ordinal_string())
             };
 
             let _ = discord_http
-                                .send_message(
-                                    leaderboard_channel.into(),
-                                    Vec::new(),
-                                    &json!({ "content": format!(
-                                        "## {} Place: {} by {} ({} views)\n\n{}",
-                                        (n+1).to_ordinal_string(), clip.title, clip.creator_name, clip.view_count, clip.url
-                                    ) }),
-                                )
-                                .await;
+                .send_message(
+                    leaderboard_channel.into(),
+                    Vec::new(),
+                    &json!({ "content": format_string }),
+                )
+                .await;
 
             wait_interval.tick().await;
         }

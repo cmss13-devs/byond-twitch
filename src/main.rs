@@ -45,7 +45,7 @@ use twitch_api::helix::predictions::{end_prediction, get_predictions};
 use twitch_api::twitch_oauth2::{
     self, AppAccessToken, ClientId, ClientSecret, Scope, TwitchToken as _, UserToken,
 };
-use twitch_api::types::{PredictionStatus, Timestamp};
+use twitch_api::types::{PredictionStatus, Timestamp, UserId};
 use twitch_api::{
     client::ClientDefault,
     eventsub::{self, Event, Message, Payload},
@@ -120,12 +120,8 @@ async fn main() -> Result<(), eyre::Report> {
     let game_config = config.game.clone();
     let twitch_key = config.twitch.api_secret.clone();
 
-    tokio::spawn(async move {
-        let _ = start_webserver(game_config, twitch_key).await;
-    });
-
     let client: HelixClient<reqwest::Client> = twitch_api::HelixClient::with_client(
-        ClientDefault::default_client_with_name(Some("my_chatbot".parse()?))?,
+        ClientDefault::default_client_with_name(Some("byond-twitch".parse()?))?,
     );
 
     let token_path = &opts.persist.join("token.txt");
@@ -217,6 +213,20 @@ async fn main() -> Result<(), eyre::Report> {
     let broadcaster_user_token = Arc::new(Mutex::new(broadcaster_user_token));
     let bot_app_token = Arc::new(Mutex::new(bot_app_token));
 
+    let webserver_token = bot_app_token.clone();
+    let response_user_id = config.twitch.response_user_id.clone();
+    let webserver_broadcaster = broadcaster.clone();
+    tokio::spawn(async move {
+        let _ = start_webserver(
+            game_config,
+            twitch_key,
+            webserver_token,
+            response_user_id,
+            webserver_broadcaster,
+        )
+        .await;
+    });
+
     let published_clips = Arc::new(Mutex::new(published_clips));
 
     let bot = Bot {
@@ -248,12 +258,14 @@ struct RedisRoundEvent {
 async fn start_webserver(
     config: GameConfig,
     twitch_secret: Option<String>,
+    app_token: Arc<Mutex<AppAccessToken>>,
+    responder_user_id: String,
+    broadcaster_user_id: UserId,
 ) -> Result<(), eyre::Report> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-
     let listener = TcpListener::bind(addr).await?;
-    let role_icons = Arc::new(Mutex::new(RequestCache::default()));
 
+    let cache = Arc::new(Mutex::new(RequestCache::default()));
     loop {
         let (stream, _) = listener.accept().await?;
 
@@ -261,8 +273,11 @@ async fn start_webserver(
 
         let config = config.clone();
         let twitch_secret = twitch_secret.clone();
+        let app_access_token = app_token.clone();
+        let responder_user_id = responder_user_id.clone();
+        let broadcaster_user_id = broadcaster_user_id.clone();
 
-        let role_icons = role_icons.clone();
+        let cache = cache.clone();
 
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -272,8 +287,11 @@ async fn start_webserver(
                         handle_request(
                             req,
                             config.clone(),
-                            role_icons.clone(),
+                            cache.clone(),
                             twitch_secret.clone(),
+                            app_access_token.clone(),
+                            responder_user_id.clone(),
+                            broadcaster_user_id.clone(),
                         )
                     }),
                 )
@@ -321,6 +339,9 @@ async fn handle_request(
     config: GameConfig,
     request_cache: Arc<Mutex<RequestCache>>,
     twitch_secret: Option<String>,
+    app_token: Arc<Mutex<AppAccessToken>>,
+    responder_user_id: String,
+    broadcaster_user_id: UserId,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     match request.uri().path() {
         "/role_icons" => match *request.method() {
@@ -484,9 +505,9 @@ async fn handle_request(
                 auth: Some(config.comms_key),
                 source: "byond-twitch-web".to_string(),
                 command: "follow".to_string(),
-                args: request.name,
+                args: &request.name,
                 is_moderator,
-                user_id,
+                user_id: &user_id,
                 username: None,
             }) else {
                 return get_response_with_code("An error occured preparing to fetch data!", 501);
@@ -512,6 +533,30 @@ async fn handle_request(
             };
 
             if let Ok(code) = response.statuscode.try_into() {
+                if code == 200 {
+                    let client: HelixClient<reqwest::Client> = twitch_api::HelixClient::with_client(
+                        ClientDefault::default_client_with_name(Some(
+                            "byond-twitch-web".parse().unwrap(),
+                        ))
+                        .unwrap(),
+                    );
+
+                    let app_token = app_token.lock().await.clone();
+                    if let Ok(Some(user)) = client.get_user_from_id(&user_id, &app_token).await {
+                        let _ = client
+                            .send_chat_message(
+                                broadcaster_user_id,
+                                responder_user_id,
+                                &*format!(
+                                    "{} has requested to follow '{}' via Overlay!",
+                                    user.display_name, request.name
+                                ),
+                                &app_token,
+                            )
+                            .await;
+                    }
+                }
+
                 get_response_with_code(&response.response, code)
             } else {
                 get_response_with_code("Internal server error.", 501)
@@ -1185,10 +1230,10 @@ impl Bot {
             query: "cmtv".to_string(),
             command: command.to_string(),
             username: Some(payload.chatter_user_login.to_string()),
-            user_id: payload.chatter_user_id.to_string(),
+            user_id: &payload.chatter_user_id.to_string(),
             is_moderator,
             auth: Some(self.config.game.comms_key.clone()),
-            args: rest.to_string(),
+            args: &rest.to_string(),
             source: "byond-twitch".to_string(),
         })?;
 
@@ -1204,7 +1249,7 @@ impl Bot {
 
         let response = serde_json::from_str::<GameResponse>(&received)?;
 
-        if response.statuscode == 200 {
+        if response.statuscode == 200 || response.statuscode == 303 {
             let _ = self
                 .client
                 .send_chat_message_reply(
@@ -1221,8 +1266,9 @@ impl Bot {
     }
 }
 
-static JOIN_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"([dt]o).*join|(can\si\sjoin)").unwrap());
+static JOIN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"([dt]o).*(join|play)|(can\si\s(join|play))|how\si\s(join|play)").unwrap()
+});
 
 #[derive(serde::Serialize)]
 struct GameRequest {
@@ -1246,12 +1292,12 @@ struct Player {
 }
 
 #[derive(serde::Serialize)]
-struct GameCMTVCommand {
+struct GameCMTVCommand<'a> {
     query: String,
     command: String,
-    args: String,
+    args: &'a String,
     username: Option<String>,
-    user_id: String,
+    user_id: &'a String,
     is_moderator: bool,
     auth: Option<String>,
     source: String,

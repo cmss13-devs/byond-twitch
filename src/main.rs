@@ -699,18 +699,21 @@ impl Bot {
             };
 
             let mut every_25 = -2;
+            let mut every_50 = 0;
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 every_25 += 1;
+                every_50 += 1;
 
                 let token = app_token.lock().await.clone();
 
                 if every_25 > 25 || every_25 == -1 {
                     Bot::handle_clip_leaderboard(&inner_client, &broadcaster, &token, &discord)
                         .await;
+                    every_25 = 0;
                 }
 
-                if every_25 > 25 {
+                if every_50 > 250 {
                     let app_token = app_token.lock().await.clone();
 
                     let options = [
@@ -732,7 +735,7 @@ impl Bot {
                             .await;
                     }
 
-                    every_25 = 0;
+                    every_50 = 0;
                 }
 
                 let Some(prev_1) = chrono::Utc::now().date_naive().pred_opt() else {

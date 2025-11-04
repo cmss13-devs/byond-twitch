@@ -13,7 +13,7 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 use twitch_api::helix;
 use twitch_api::helix::predictions::create_prediction::{self, NewPredictionOutcome};
 use twitch_api::helix::predictions::{end_prediction, get_predictions};

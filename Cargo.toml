@@ -27,7 +27,7 @@ futures = "0.3.31"
 http2byond = "0.2.0"
 serde_json = "1.0.145"
 chrono = "0.4.42"
-redis = "0.32.7"
+redis = { version = "0.32.7", features = ["tokio-comp"] }
 hyper = { version = "1.7.0", features = ["full"] }
 hyper-util = { version = "0.1.17", features = ["full"] }
 http-body-util = "0.1.3"

@@ -7,6 +7,7 @@ pub mod websocket;
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
 use eyre::eyre;
+use futures::StreamExt;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -558,6 +559,7 @@ impl Bot {
                         .refresh_token(&self.client)
                         .await
                         .wrap_err("couldn't refresh token")?;
+                    tracing::info!("refreshed token successfully");
                 }
                 token
                     .validate_token(&client)
@@ -722,63 +724,31 @@ impl Bot {
         let app_access_token = self.bot_app_token.clone();
         let response_user_id = self.config.response_user_id.clone();
 
-        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-        tokio::task::spawn_blocking(move || {
-            loop {
-                let redis_client = match redis::Client::open(redis_url.clone()) {
-                    Ok(ok) => ok,
-                    Err(err) => {
-                        tracing::error!("could not create redis client: {err}");
-                        std::thread::sleep(std::time::Duration::from_secs(5));
-                        continue; // Retry connection
-                    }
-                };
-
-                let mut conn = match redis_client.get_connection() {
-                    Ok(connection) => connection,
-                    Err(err) => {
-                        tracing::error!("failed to get redis connection: {err}");
-                        std::thread::sleep(std::time::Duration::from_secs(5));
-                        continue;
-                    }
-                };
-
-                let mut pub_sub = conn.as_pubsub();
-
-                if let Err(err) = pub_sub.subscribe(&["byond.round"]) {
-                    tracing::error!("failed to subscribe to channel: {}", err);
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    continue; // Retry subscription
-                }
-
-                tracing::info!("Successfully connected to Redis pubsub");
-
-                loop {
-                    match pub_sub.get_message() {
-                        Ok(msg) => {
-                            if let Ok(payload) = msg.get_payload::<String>() {
-                                tracing::info!("dispatched payload: {}", &payload);
-                                if msg_tx.send(payload).is_err() {
-                                    tracing::error!("receiver dropped, exiting redis task");
-                                    return;
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            tracing::error!("error receiving message: {err}");
-                            tracing::info!("reconnecting to redis in 5 seconds...");
-                            std::thread::sleep(std::time::Duration::from_secs(5));
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
         tokio::spawn(async move {
+            let redis_client = match redis::Client::open(redis_url.clone()) {
+                Ok(ok) => ok,
+                Err(err) => {
+                    tracing::error!(err = ?err, "could not create redis client");
+                    return;
+                }
+            };
+
+            let pubsub = match redis_client.get_async_pubsub().await {
+                Ok(ok) => ok,
+                Err(err) => {
+                    tracing::error!(err = ?err, "could not get pubsub");
+                    return;
+                }
+            };
+            let (mut sink, mut stream) = pubsub.split();
+            sink.subscribe(&["byond.round"]).await;
+
             tracing::info!("connected to redis");
-            while let Some(unwrapped) = msg_rx.recv().await {
+            while let Some(unwrapped) = stream.next().await {
+                let Ok(unwrapped) = unwrapped.get_payload::<String>() else {
+                    tracing::error!("unable to get payload as string");
+                    continue;
+                };
                 tracing::info!("received payload: {}", &unwrapped);
 
                 let Ok(deserialized) = serde_json::from_str::<RedisRoundEvent>(&unwrapped) else {
@@ -801,14 +771,17 @@ impl Bot {
                         let request =
                             get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
 
-                        let existing_response_result =
-                            match inner_client.req_get(request, &broadcaster_user_token).await {
-                                Ok(res) => res,
-                                Err(err) => {
-                                    tracing::error!("error getting existing predictions: {err}");
-                                    continue;
-                                }
-                            };
+                        let existing_response_result = match inner_client
+                            .req_get(request, &broadcaster_user_token)
+                            .await
+                        {
+                            Ok(res) => res,
+                            Err(err) => {
+                                tracing::error!(err = ?err, "error getting existing predictions");
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                continue;
+                            }
+                        };
 
                         let existing_response: Vec<get_predictions::Prediction> =
                             existing_response_result.data;

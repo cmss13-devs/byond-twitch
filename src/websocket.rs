@@ -65,31 +65,47 @@ impl ChatWebsocketClient {
                 .await
                 .context("when establishing connection")?;
             // Loop over the stream, processing messages as they come in.
-            while let Some(msg) = futures::StreamExt::next(&mut s).await {
-                let span = tracing::debug_span!("message received", raw_message = ?msg);
-                let msg = match msg {
-                    Err(tungstenite::Error::Protocol(
+            loop {
+                match futures::StreamExt::next(&mut s).await {
+                    Some(Ok(msg)) => {
+                        let span = tracing::debug_span!("message received", raw_message = ?msg);
+                        if let Err(err) = self
+                            .process_message(msg, &mut event_fn)
+                            .instrument(span)
+                            .await
+                        {
+                            tracing::error!(error = ?err, "failed to process websocket message");
+                            break;
+                        }
+                    }
+                    Some(Err(tungstenite::Error::Protocol(
                         tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
-                    )) => {
+                    ))) => {
                         tracing::warn!(
-                        "connection was sent an unexpected frame or was reset, reestablishing it"
-                    );
-                        s = self
+                            "connection was sent an unexpected frame or was reset, reestablishing it"
+                        );
+                        let span = tracing::debug_span!("reestablish_connection");
+                        s = match self
                             .connect()
                             .instrument(span)
                             .await
-                            .context("when reestablishing connection")?;
-                        continue;
+                            .context("when reestablishing connection")
+                        {
+                            Ok(socket) => socket,
+                            Err(err) => {
+                                tracing::error!(error = ?err, "failed to reestablish connection");
+                                return Err(err);
+                            }
+                        };
                     }
-                    _ => msg.context("when getting message")?,
-                };
-                match self
-                    .process_message(msg, &mut event_fn)
-                    .instrument(span)
-                    .await
-                {
-                    Ok(()) => (),
-                    Err(_) => break,
+                    Some(Err(err)) => {
+                        tracing::error!(error = ?err, "error receiving websocket message");
+                        return Err(err).wrap_err("when getting message");
+                    }
+                    None => {
+                        tracing::error!("nothing in stream");
+                        break;
+                    }
                 }
             }
         }

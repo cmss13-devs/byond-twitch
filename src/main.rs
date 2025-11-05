@@ -23,7 +23,6 @@ use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 use twitch_api::helix::clips::Clip;
 
-use tracing_subscriber::{registry::Registry, Layer, prelude::*};
 use chrono::Datelike;
 use clap::Parser;
 use eyre::WrapErr as _;
@@ -41,6 +40,7 @@ use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+use tracing_subscriber::{prelude::*, registry::Registry, Layer};
 use twitch_api::helix;
 use twitch_api::helix::predictions::create_prediction::{self, NewPredictionOutcome};
 use twitch_api::helix::predictions::{end_prediction, get_predictions};
@@ -104,7 +104,6 @@ impl Config {
 
 #[tokio::main]
 async fn main() -> Result<(), eyre::Report> {
-
     color_eyre::install()?;
 
     let prev = std::panic::take_hook();
@@ -113,13 +112,13 @@ async fn main() -> Result<(), eyre::Report> {
         std::process::exit(1);
     }));
 
-    let console_layer = console_subscriber::spawn();
+    let (console_layer, _) = console_subscriber::ConsoleLayer::builder()
+        .retention(std::time::Duration::from_secs(60))
+        .server_addr(([0, 0, 0, 0], 6669))
+        .build();
     tracing_subscriber::registry()
         .with(console_layer)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false),
-        )
+        .with(tracing_subscriber::fmt::layer().with_ansi(false))
         .init();
 
     _ = dotenvy::dotenv();

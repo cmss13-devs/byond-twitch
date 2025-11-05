@@ -23,6 +23,7 @@ use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 use twitch_api::helix::clips::Clip;
 
+use tracing_subscriber::{registry::Registry, Layer, prelude::*};
 use chrono::Datelike;
 use clap::Parser;
 use eyre::WrapErr as _;

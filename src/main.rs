@@ -103,6 +103,8 @@ impl Config {
 
 #[tokio::main]
 async fn main() -> Result<(), eyre::Report> {
+    console_subscriber::init();
+
     color_eyre::install()?;
 
     let prev = std::panic::take_hook();

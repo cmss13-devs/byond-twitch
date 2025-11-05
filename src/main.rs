@@ -648,30 +648,29 @@ impl Bot {
 
                 if inner_token.expires_in() < std::time::Duration::from_secs(60) {
                     tracing::info!("refreshing token...");
-                    inner_token
-                        .refresh_token(&self.client)
-                        .await
-                        .wrap_err("couldn't refresh token")?;
-                    let mut relocked = token.lock().await;
-                    tracing::info!(
-                        "refreshed token successfully, now {:?}",
-                        inner_token.expires_in().as_secs()
-                    );
-                    *relocked = inner_token;
 
-                    inner_token = token.lock().await.clone();
+                    // Network call without holding lock
+                    if let Ok(()) = inner_token.refresh_token(&client).await {
+                        // Only lock briefly to write back
+                        let mut guard = token.lock().await;
+                        *guard = inner_token.clone();
+                        tracing::info!(
+                            "refreshed token successfully, expires in {:?}",
+                            inner_token.expires_in().as_secs()
+                        );
+                    }
+
+                    continue; // Skip validation if we just refreshed
                 }
-                if inner_token
-                    .validate_token(&client)
-                    .await
-                    .wrap_err("couldn't validate token")
-                    .is_err()
-                {
-                    let _ = inner_token.refresh_token(&self.client).await;
-                    let mut relocked = token.lock().await;
-                    *relocked = inner_token;
 
-                    tracing::info!("refreshed token after failed to validate token");
+                // Validate without holding lock
+                if inner_token.validate_token(&client).await.is_err() {
+                    tracing::warn!("token validation failed, refreshing...");
+                    if let Ok(()) = inner_token.refresh_token(&client).await {
+                        let mut guard = token.lock().await;
+                        *guard = inner_token;
+                        tracing::info!("refreshed token after validation failure");
+                    }
                 }
             }
             #[allow(unreachable_code)]

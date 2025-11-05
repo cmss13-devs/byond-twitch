@@ -105,13 +105,13 @@ impl Config {
 async fn main() -> Result<(), eyre::Report> {
     console_subscriber::init();
 
-    color_eyre::install()?;
+//    color_eyre::install()?;
 
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        prev(info);
-        std::process::exit(1);
-    }));
+//    let prev = std::panic::take_hook();
+//    std::panic::set_hook(Box::new(move |info| {
+//        prev(info);
+//        std::process::exit(1);
+//    }));
 
     tracing_subscriber::fmt::fmt()
         .with_writer(std::io::stderr)

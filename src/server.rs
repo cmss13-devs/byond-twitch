@@ -30,24 +30,27 @@ impl WebsocketServer {
         loop {
             let (stream, _) = listener.accept().await?;
             let mut receiver = self.tx.lock().await.subscribe();
-            tokio::spawn(async move {
-                let ws_stream = accept_async(stream).await;
-                match ws_stream {
-                    Ok(mut ws) => {
-                        loop {
-                            if ws.is_terminated() {
-                                break;
-                            }
 
-                            if let Ok(message) = receiver.recv().await {
-                                let _ = ws.send(Message::text(message)).await;
+            let _ = tokio::task::Builder::new()
+                .name("web handler")
+                .spawn(async move {
+                    let ws_stream = accept_async(stream).await;
+                    match ws_stream {
+                        Ok(mut ws) => {
+                            loop {
+                                if ws.is_terminated() {
+                                    break;
+                                }
+
+                                if let Ok(message) = receiver.recv().await {
+                                    let _ = ws.send(Message::text(message)).await;
+                                }
                             }
+                            Ok(())
                         }
-                        Ok(())
+                        Err(e) => bail!("Failed to accept websocket: {}", e),
                     }
-                    Err(e) => bail!("Failed to accept websocket: {}", e),
-                }
-            });
+                });
         }
     }
 }

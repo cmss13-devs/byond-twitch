@@ -230,17 +230,20 @@ async fn main() -> Result<(), eyre::Report> {
     let response_user_id = config.twitch.response_user_id.clone();
     let webserver_broadcaster = broadcaster.clone();
     let persist = opts.persist.clone();
-    tokio::spawn(async move {
-        let _ = start_webserver(
-            game_config,
-            twitch_key,
-            webserver_token,
-            response_user_id,
-            webserver_broadcaster,
-            persist,
-        )
-        .await;
-    });
+
+    let _ = tokio::task::Builder::new()
+        .name("webserver handler")
+        .spawn(async move {
+            let _ = start_webserver(
+                game_config,
+                twitch_key,
+                webserver_token,
+                response_user_id,
+                webserver_broadcaster,
+                persist,
+            )
+            .await;
+        });
 
     let published_clips = Arc::new(Mutex::new(published_clips));
 
@@ -704,7 +707,8 @@ impl Bot {
         let discord_config = self.config.discord.clone();
 
         let persist = self.opts.persist.clone();
-        tokio::spawn(async move {
+
+        let _ = tokio::task::Builder::new().name("api loop").spawn(async move {
             let Some(discord) = discord_config else {
                 return;
             };
@@ -980,7 +984,7 @@ impl Bot {
         let app_access_token = self.bot_app_token.clone();
         let response_user_id = self.config.twitch.response_user_id.clone();
 
-        tokio::spawn(async move {
+        tokio::task::Builder::new().name("redis handler").spawn(async move {
             let redis_client = match redis::Client::open(redis_url.clone()) {
                 Ok(ok) => ok,
                 Err(err) => {
@@ -1182,7 +1186,7 @@ impl Bot {
                     _ => {}
                 }
             }
-        });
+        })?;
 
         Ok(())
     }

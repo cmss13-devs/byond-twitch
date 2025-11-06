@@ -22,10 +22,12 @@ use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 use twitch_api::helix::clips::Clip;
+use twitch_api::helix::subscriptions::BroadcasterSubscription;
 
 use chrono::Datelike;
 use clap::Parser;
 use eyre::WrapErr as _;
+use futures::TryStreamExt;
 use http2byond::ByondTopicValue;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -235,6 +237,7 @@ async fn main() -> Result<(), eyre::Report> {
     let bot_app_token = Arc::new(Mutex::new(bot_app_token));
 
     let webserver_token = bot_app_token.clone();
+    let webserver_broadcaster_token = broadcaster_user_token.clone();
     let response_user_id = config.twitch.response_user_id.clone();
     let webserver_broadcaster = broadcaster.clone();
     let persist = opts.persist.clone();
@@ -246,6 +249,7 @@ async fn main() -> Result<(), eyre::Report> {
                 game_config,
                 twitch_key,
                 webserver_token,
+                webserver_broadcaster_token,
                 response_user_id,
                 webserver_broadcaster,
                 persist,
@@ -285,6 +289,7 @@ async fn start_webserver(
     config: GameConfig,
     twitch_secret: Option<String>,
     app_token: Arc<Mutex<AppAccessToken>>,
+    broadcaster_user_token: Arc<Mutex<UserToken>>,
     responder_user_id: String,
     broadcaster_user_id: UserId,
     persist: PathBuf,
@@ -311,6 +316,7 @@ async fn start_webserver(
         let app_access_token = app_token.clone();
         let responder_user_id = responder_user_id.clone();
         let broadcaster_user_id = broadcaster_user_id.clone();
+        let broadcaster_user_token = broadcaster_user_token.clone();
 
         let persist = persist.clone();
 
@@ -326,6 +332,7 @@ async fn start_webserver(
                             config.clone(),
                             cache.clone(),
                             twitch_secret.clone(),
+                            broadcaster_user_token.clone(),
                             app_access_token.clone(),
                             responder_user_id.clone(),
                             broadcaster_user_id.clone(),
@@ -378,6 +385,7 @@ async fn handle_request(
     config: GameConfig,
     request_cache: Arc<Mutex<RequestCache>>,
     twitch_secret: Option<String>,
+    broadcaster_user_token: Arc<Mutex<UserToken>>,
     app_token: Arc<Mutex<AppAccessToken>>,
     responder_user_id: String,
     broadcaster_user_id: UserId,
@@ -614,8 +622,54 @@ async fn handle_request(
                 get_response_with_code("Internal server error.", 501)
             }
         }
+        "active_subscribers" => {
+            let Ok(collected) = request.collect().await else {
+                return get_response_with_code("An error occured.", 501);
+            };
+
+            let Ok(body_str) = String::from_utf8(collected.to_bytes().to_vec()) else {
+                return get_response_with_code("Internal server error.", 501);
+            };
+
+            let Ok(request) = serde_json::from_str::<GetRequest>(&body_str) else {
+                return get_response_with_code("Invalid request.", 503);
+            };
+
+            if request.comms_key != config.comms_key {
+                return get_response_with_code("Unauthorized.", 401);
+            }
+
+            let client: HelixClient<reqwest::Client> = twitch_api::HelixClient::with_client(
+                ClientDefault::default_client_with_name(Some("byond-twitch-web".parse().unwrap()))
+                    .unwrap(),
+            );
+
+            let Ok(subs) = client
+                .get_broadcaster_subscriptions(&broadcaster_user_token.lock().await.clone())
+                .try_collect::<Vec<BroadcasterSubscription>>()
+                .await
+            else {
+                return get_response_with_code("Failed to get subscriptions.", 501);
+            };
+
+            let Ok(response) = Response::builder()
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(
+                    serde_json::to_string(&subs).unwrap_or_default(),
+                )))
+            else {
+                return get_response_with_code("An error occured while preparing data!", 501);
+            };
+
+            Ok(response)
+        }
         _ => get_response_with_code("Bad path.", 200),
     }
+}
+
+#[derive(Deserialize)]
+struct GetRequest {
+    comms_key: String,
 }
 
 #[allow(clippy::unnecessary_wraps)]

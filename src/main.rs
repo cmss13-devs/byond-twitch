@@ -635,7 +635,7 @@ async fn handle_request(
                 return get_response_with_code("Invalid request.", 503);
             };
 
-            if request.comms_key != config.comms_key {
+            if request.auth_key != config.comms_key {
                 return get_response_with_code("Unauthorized.", 401);
             }
 
@@ -671,7 +671,7 @@ async fn handle_request(
 
 #[derive(Deserialize)]
 struct GetRequest {
-    comms_key: String,
+    auth_key: String,
 }
 
 #[allow(clippy::unnecessary_wraps)]

@@ -1327,7 +1327,8 @@ impl Bot {
                     &*response.response,
                     token,
                 )
-                .await;
+                .await
+                .inspect_err(|err| tracing::error!(err = ?err, "could not send reply"));
         }
 
         Ok(())

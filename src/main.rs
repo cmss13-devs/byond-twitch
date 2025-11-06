@@ -123,7 +123,11 @@ async fn main() -> Result<(), eyre::Report> {
 
     tracing_subscriber::registry()
         .with(console_layer)
-        .with(tracing_subscriber::fmt::layer().with_ansi(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG),
+        )
         .init();
 
     _ = dotenvy::dotenv();

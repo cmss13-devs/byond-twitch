@@ -1229,7 +1229,7 @@ impl Bot {
                             "Wanting to join the game? Download BYOND at https://www.byond.com/download and head to https://cm-ss13.com/play/main to get involved!",
                             &bot_app_token,
                         )
-                        .await;
+                        .await.inspect_err(|err| tracing::error!(err = ?err, "could not send reply"));
                 }
 
                 if let Some(full_command) = payload.message.text.strip_prefix("!") {

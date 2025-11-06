@@ -171,7 +171,11 @@ async fn main() -> Result<(), eyre::Report> {
     if broadcaster_user_token.is_none() {
         let mut builder = twitch_api::twitch_oauth2::tokens::DeviceUserTokenBuilder::new(
             config.twitch.client_id.clone(),
-            vec![Scope::UserReadChat, Scope::ChannelManagePredictions],
+            vec![
+                Scope::UserReadChat,
+                Scope::ChannelManagePredictions,
+                Scope::ChannelReadSubscriptions,
+            ],
         );
         builder.set_secret(Some(config.twitch.client_secret.clone()));
         let code = builder.start(&client).await?;

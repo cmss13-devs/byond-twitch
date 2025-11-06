@@ -126,7 +126,7 @@ async fn main() -> Result<(), eyre::Report> {
         .with(
             tracing_subscriber::fmt::layer()
                 .with_ansi(false)
-                .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG),
+                .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
         )
         .init();
 

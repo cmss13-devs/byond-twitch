@@ -652,6 +652,8 @@ async fn handle_request(
                 return get_response_with_code("Failed to get subscriptions.", 501);
             };
 
+            let subs: Vec<UserId> = subs.iter().map(|sub| sub.user_id.clone()).collect();
+
             let Ok(response) = Response::builder()
                 .header("Content-Type", "application/json")
                 .body(Full::new(Bytes::from(

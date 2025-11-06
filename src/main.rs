@@ -622,7 +622,7 @@ async fn handle_request(
                 get_response_with_code("Internal server error.", 501)
             }
         }
-        "active_subscribers" => {
+        "/active_subscribers" => {
             let Ok(collected) = request.collect().await else {
                 return get_response_with_code("An error occured.", 501);
             };

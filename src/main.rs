@@ -1133,6 +1133,7 @@ impl Bot {
                         let outcomes = vec![
                             NewPredictionOutcome::new("Marines"),
                             NewPredictionOutcome::new("Xenos"),
+                            NewPredictionOutcome::new("Something unexpected")
                         ];
                         let body = create_prediction::CreatePredictionBody::new(
                             &broadcaster_id,
@@ -1204,6 +1205,9 @@ impl Bot {
                         } else if outcome.contains("Marine") {
                             "Marines"
                         } else {
+                            "Something unexpected"
+
+                            /*
                             tracing::warn!("unexpected outcome, cancelling");
 
                             let request = end_prediction::EndPredictionRequest::new();
@@ -1217,6 +1221,7 @@ impl Bot {
                                 .req_patch(request, body, &broadcaster_user_token)
                                 .await;
                             continue;
+                            */
                         };
 
                         for prediction in &first_response.outcomes {

@@ -7,49 +7,37 @@ pub mod web_handler;
 pub mod websocket;
 
 use base64::Engine;
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use eyre::eyre;
 use futures::StreamExt;
-use hmac::{Hmac, Mac};
+use hmac::Mac;
 use ordinal::ToOrdinal;
 use regex::Regex;
 use serde_json::json;
-use sha2::Sha256;
-use std::collections::HashMap;
-use std::convert::Infallible;
 use std::fs;
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::PathBuf;
+use std::net::ToSocketAddrs;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 use twitch_api::helix::clips::Clip;
-use twitch_api::helix::subscriptions::BroadcasterSubscription;
 
 use chrono::Datelike;
 use clap::Parser;
 use eyre::WrapErr as _;
 use futures::TryStreamExt;
 use http2byond::ByondTopicValue;
-use http_body_util::{BodyExt, Full};
-use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
-use jwt::VerifyWithKey;
+use http_body_util::BodyExt;
 use rand::seq::IndexedRandom;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing_subscriber::{prelude::*, Layer};
 use twitch_api::helix;
 use twitch_api::twitch_oauth2::{
     self, AppAccessToken, ClientId, ClientSecret, Scope, TwitchToken, UserToken,
 };
-use twitch_api::types::{Timestamp, UserId};
+use twitch_api::types::Timestamp;
 use twitch_api::{
     client::ClientDefault,
     eventsub::{self, Event, Message, Payload},

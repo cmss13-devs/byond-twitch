@@ -1,6 +1,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::suspicious)]
 #![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 
+pub mod redis_handler;
 pub mod server;
 pub mod websocket;
 
@@ -13,13 +14,14 @@ use ordinal::ToOrdinal;
 use regex::Regex;
 use serde_json::json;
 use sha2::Sha256;
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use tracing::instrument;
 use twitch_api::helix::clips::Clip;
 use twitch_api::helix::subscriptions::BroadcasterSubscription;
@@ -55,6 +57,8 @@ use twitch_api::{
     eventsub::{self, Event, Message, Payload},
     HelixClient,
 };
+
+use crate::redis_handler::RedisBot;
 
 #[derive(Parser, Debug, Clone)]
 #[clap(about, version)]
@@ -268,6 +272,7 @@ async fn main() -> Result<(), eyre::Report> {
         config,
         broadcaster,
     };
+
     bot.start().await?;
     Ok(())
 }
@@ -1048,209 +1053,18 @@ impl Bot {
         let app_access_token = self.bot_app_token.clone();
         let response_user_id = self.config.twitch.response_user_id.clone();
 
-        tokio::task::Builder::new().name("redis handler").spawn(async move {
-            let redis_client = match redis::Client::open(redis_url.clone()) {
-                Ok(ok) => ok,
-                Err(err) => {
-                    tracing::error!(err = ?err, "could not create redis client");
-                    return;
-                }
-            };
+        let bot = RedisBot {
+            broadcaster_id,
+            inner_client,
+            broadcaster_user_token,
+            app_access_token,
+            response_user_id,
+            redis_url,
+        };
 
-            let pubsub = match redis_client.get_async_pubsub().await {
-                Ok(ok) => ok,
-                Err(err) => {
-                    tracing::error!(err = ?err, "could not get pubsub");
-                    return;
-                }
-            };
-            let (mut sink, mut stream) = pubsub.split();
-
-            if let Err(err) = sink.subscribe(&["byond.round"]).await {
-                tracing::error!(err = ?err, "unable to subscribe on pubsub");
-                return;
-            }
-
-            tracing::info!("connected to redis");
-            while let Some(unwrapped) = stream.next().await {
-                let Ok(unwrapped) = unwrapped.get_payload::<String>() else {
-                    tracing::error!("unable to get payload as string");
-                    continue;
-                };
-
-                let Ok(deserialized) = serde_json::from_str::<RedisRoundEvent>(&unwrapped) else {
-                    tracing::info!("could not deserialise");
-                    continue;
-                };
-
-                if deserialized.source != "cm13-live" {
-                    tracing::info!("non-primary source");
-                    continue;
-                }
-
-                match deserialized.string_type.as_str() {
-                    "round-start" => {
-                        tracing::info!("redis: round start");
-
-                        let broadcaster_user_token = broadcaster_user_token.lock().await.clone();
-                        let app_access_token = app_access_token.lock().await.clone();
-
-                        let request =
-                            get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
-
-                        let existing_response_result = match inner_client
-                            .req_get(request, &broadcaster_user_token)
-                            .await
-                        {
-                            Ok(res) => res,
-                            Err(err) => {
-                                tracing::error!(err = ?err, "error getting existing predictions");
-                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                                continue;
-                            }
-                        };
-
-                        let existing_response: Vec<get_predictions::Prediction> =
-                            existing_response_result.data;
-
-                        if let Some(existing) = existing_response.first() {
-                            if existing.status == PredictionStatus::Active
-                                || existing.status == PredictionStatus::Locked
-                            {
-                                let request = end_prediction::EndPredictionRequest::new();
-                                let body = end_prediction::EndPredictionBody::new(
-                                    &broadcaster_id,
-                                    &existing.id,
-                                    PredictionStatus::Canceled,
-                                );
-
-                                let _ = inner_client
-                                    .req_patch(request, body, &broadcaster_user_token)
-                                    .await;
-                            }
-                        }
-
-                        let outcomes = vec![
-                            NewPredictionOutcome::new("Marines"),
-                            NewPredictionOutcome::new("Xenos"),
-                        ];
-                        let body = create_prediction::CreatePredictionBody::new(
-                            &broadcaster_id,
-                            format!("Who will win Round {}?", &deserialized.round_id),
-                            &outcomes,
-                            1200,
-                        );
-
-                        let request = create_prediction::CreatePredictionRequest::new();
-
-                        let _ = inner_client
-                            .req_post(request, body, &broadcaster_user_token)
-                            .await
-                            .inspect_err(|err| {
-                                tracing::error!("error in creating prediction {}", err);
-                            });
-
-                        let _ = inner_client
-                            .send_chat_message(
-                                &broadcaster_id,
-                                &response_user_id,
-                                "New round beginning! Vote on the outcome for the next 20 minutes.",
-                                &app_access_token,
-                            )
-                            .await
-                            .inspect_err(|err| tracing::error!("error in posting to chat {}", err));
-
-                        tracing::info!("created new prediction");
-                    }
-                    "round-complete" => {
-                        tracing::info!("redis: round complete");
-
-                        let broadcaster_user_token = broadcaster_user_token.lock().await.clone();
-                        let app_access_token = app_access_token.lock().await.clone();
-
-                        let request =
-                            get_predictions::GetPredictionsRequest::broadcaster_id(&broadcaster_id);
-
-                        let Ok(existing_response) =
-                            inner_client.req_get(request, &broadcaster_user_token).await
-                        else {
-                            continue;
-                        };
-
-                        let Some(first_response) = existing_response.first() else {
-                            tracing::warn!("no responses from api");
-                            continue;
-                        };
-
-                        if !&first_response
-                            .title
-                            .contains(&deserialized.round_id.to_string())
-                        {
-                            tracing::warn!(
-                                "most recent prediction not our roundid: {} vs {}",
-                                &first_response.title,
-                                &deserialized.round_id
-                            );
-                            continue;
-                        }
-
-                        let Some(outcome) = deserialized.round_finished else {
-                            tracing::warn!("could not deserialize information from game");
-                            continue;
-                        };
-
-                        let search_string = if outcome.contains("Xenomorph") {
-                            "Xenos"
-                        } else if outcome.contains("Marine") {
-                            "Marines"
-                        } else {
-                            tracing::warn!("unexpected outcome, cancelling");
-
-                            let request = end_prediction::EndPredictionRequest::new();
-                            let body = end_prediction::EndPredictionBody::new(
-                                &broadcaster_id,
-                                &first_response.id,
-                                PredictionStatus::Canceled,
-                            );
-
-                            let _ = inner_client
-                                .req_patch(request, body, &broadcaster_user_token)
-                                .await;
-                            continue;
-                        };
-
-                        for prediction in &first_response.outcomes {
-                            if prediction.title != search_string {
-                                continue;
-                            }
-
-                            let request = end_prediction::EndPredictionRequest::new();
-                            let body = end_prediction::EndPredictionBody::new(
-                                &broadcaster_id,
-                                &first_response.id,
-                                PredictionStatus::Resolved,
-                            )
-                            .winning_outcome_id(&prediction.id);
-
-                            let _ = inner_client
-                                .req_patch(request, body, &broadcaster_user_token)
-                                .await;
-                            let _ = inner_client
-                                .send_chat_message(
-                                    &broadcaster_id,
-                                    &response_user_id,
-                                    &*format!("Round finished! The result was {outcome}."),
-                                    &app_access_token,
-                                )
-                                .await;
-
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        })?;
+        let _ = tokio::task::Builder::new()
+            .name("redis handler")
+            .spawn(async move { bot.run().await });
 
         Ok(())
     }

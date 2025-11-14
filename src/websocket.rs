@@ -1,6 +1,7 @@
 use eyre::{eyre, WrapErr};
 use futures::TryStreamExt;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite;
 use tracing::Instrument;
@@ -107,6 +108,9 @@ impl ChatWebsocketClient {
                         break;
                     }
                 }
+
+                tracing::info!("reconnecting in 5 seconds...");
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
     }

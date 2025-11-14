@@ -796,7 +796,7 @@ impl Bot {
                     let app_token = app_token.lock().await.clone();
 
                     let options = [
-                        "Go to our website at https://cm-ss13.com/play to learn how to get involved in the action!",
+                        "Go to our website at https://cm-ss13.com/play/main to learn how to get involved in the action!",
                         "View available chat commands using !help.",
                         "You can switch the perspective of the camera every 30 minutes using !follow.",
                         "Join our Discord at https://discord.gg/cmss13 to get involved with the community!",
@@ -1272,6 +1272,7 @@ impl Bot {
                     timestamp, payload.chatter_user_name, payload.message.text
                 );
 
+                /*
                 if JOIN_REGEX
                     .find(&payload.message.text.to_lowercase())
                     .is_some()
@@ -1287,6 +1288,7 @@ impl Bot {
                         )
                         .await.inspect_err(|err| tracing::error!(err = ?err, "could not send reply"));
                 }
+                */
 
                 if let Some(full_command) = payload.message.text.strip_prefix("!") {
                     let mut split_whitespace = full_command.split_whitespace();

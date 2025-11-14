@@ -14,14 +14,13 @@ use ordinal::ToOrdinal;
 use regex::Regex;
 use serde_json::json;
 use sha2::Sha256;
-use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 use twitch_api::helix::clips::Clip;
 use twitch_api::helix::subscriptions::BroadcasterSubscription;
@@ -44,14 +43,12 @@ use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use tracing_subscriber::{prelude::*, registry::Registry, Layer};
+use tracing_subscriber::{prelude::*, Layer};
 use twitch_api::helix;
-use twitch_api::helix::predictions::create_prediction::{self, NewPredictionOutcome};
-use twitch_api::helix::predictions::{end_prediction, get_predictions};
 use twitch_api::twitch_oauth2::{
     self, AppAccessToken, ClientId, ClientSecret, Scope, TwitchToken, UserToken,
 };
-use twitch_api::types::{PredictionStatus, Timestamp, UserId};
+use twitch_api::types::{Timestamp, UserId};
 use twitch_api::{
     client::ClientDefault,
     eventsub::{self, Event, Message, Payload},

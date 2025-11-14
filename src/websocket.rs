@@ -108,10 +108,10 @@ impl ChatWebsocketClient {
                         break;
                     }
                 }
-
-                tracing::info!("reconnecting in 5 seconds...");
-                tokio::time::sleep(Duration::from_secs(5)).await;
             }
+
+            tracing::info!("reconnecting in 5 seconds...");
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 

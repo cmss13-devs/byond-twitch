@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use serde::Deserialize;
 use tokio::sync::Mutex;
 use twitch_api::{
     helix::predictions::{
@@ -11,8 +12,6 @@ use twitch_api::{
     types::{PredictionStatus, UserId},
     HelixClient,
 };
-
-use crate::RedisRoundEvent;
 
 #[derive(Clone)]
 pub struct RedisBot<'a> {
@@ -237,4 +236,17 @@ impl RedisBot<'_> {
             break;
         }
     }
+}
+
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+struct RedisRoundEvent {
+    source: String,
+    round_id: String,
+
+    #[serde(rename = "type")]
+    string_type: String,
+
+    round_name: Option<String>,
+    round_finished: Option<String>,
 }

@@ -1,0 +1,5 @@
+byond_host = "play.cm-ss13.com:1400"
+comms_key = "somekeyforgameconfig"
+discord_webhook = "https://discord.com/api/webhooks/fillthisout"
+response_user_id = "somebotuserfortwitch"
+twitch_secret = "sometwitchsecret"

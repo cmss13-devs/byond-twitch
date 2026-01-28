@@ -190,80 +190,134 @@ impl WebServer {
         parent: WebServer,
         request_cache: Arc<Mutex<RequestCache>>,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
+        let notify_to_wait: Option<Arc<tokio::sync::Notify>>;
+        let we_are_fetching: bool;
+
         {
-            let cache = request_cache.lock().await;
+            let mut cache = request_cache.lock().await;
+            let five_seconds_ago = chrono::Utc::now() - Duration::seconds(5);
 
-            if let Some(cached_time) = cache.cached_time {
+            let cache_is_fresh = cache.cached_time.is_some_and(|t| t > five_seconds_ago);
+
+            if cache_is_fresh {
                 if let Some(cached_data) = &cache.cached_status {
-                    let five_seconds_ago = chrono::Utc::now() - Duration::seconds(5);
-
-                    if cached_time > five_seconds_ago {
-                        let Ok(response) = Response::builder()
-                            .header("Content-Type", "application/json")
-                            .body(Full::new(Bytes::from(
-                                serde_json::to_string(&cached_data.data).unwrap_or_default(),
-                            )))
-                        else {
-                            return Self::get_response_with_code(
-                                "An error occured while preparing data!",
-                                501,
-                            );
-                        };
-
-                        return Ok(response);
-                    }
+                    let Ok(response) = Response::builder()
+                        .header("Content-Type", "application/json")
+                        .body(Full::new(Bytes::from(
+                            serde_json::to_string(&cached_data.data).unwrap_or_default(),
+                        )))
+                    else {
+                        return Self::get_response_with_code(
+                            "An error occured while preparing data!",
+                            501,
+                        );
+                    };
+                    return Ok(response);
                 }
+            }
+
+            if let Some(existing_notify) = &cache.refresh_notify {
+                notify_to_wait = Some(existing_notify.clone());
+                we_are_fetching = false;
+            } else {
+                let notify = Arc::new(tokio::sync::Notify::new());
+                cache.refresh_notify = Some(notify.clone());
+                notify_to_wait = None;
+                we_are_fetching = true;
             }
         }
 
-        let Ok(query) = serde_json::to_string(&GameRequest {
-            query: "active_mobs".to_string(),
-            auth: Some(parent.config.comms_key),
-            source: "byond-twitch-web".to_string(),
-        }) else {
-            return Self::get_response_with_code("An error occured preparing to fetch data!", 501);
-        };
+        if let Some(notify) = notify_to_wait {
+            notify.notified().await;
 
-        let Ok(mut address) = parent.config.host.to_socket_addrs() else {
-            return Self::get_response_with_code("Internal server error.", 501);
-        };
-
-        let Some(next) = address.next() else {
-            return Self::get_response_with_code("Internal server error.", 501);
-        };
-
-        let Ok(ByondTopicValue::String(mut received)) = http2byond::send_byond(&next, &query)
-        else {
-            return Self::get_response_with_code("An error occured fetching data!", 501);
-        };
-
-        received.pop();
-
-        let game_response = match serde_json::from_str::<GameResponse>(&received) {
-            Ok(response) => response,
-            Err(err) => {
-                tracing::error!(err = ?err, "failed to deserialize game response");
-                return Self::get_response_with_code("An error occured deserializing data!", 501);
+            let cache = request_cache.lock().await;
+            if let Some(cached_data) = &cache.cached_status {
+                let Ok(response) = Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Full::new(Bytes::from(
+                        serde_json::to_string(&cached_data.data).unwrap_or_default(),
+                    )))
+                else {
+                    return Self::get_response_with_code(
+                        "An error occured while preparing data!",
+                        501,
+                    );
+                };
+                return Ok(response);
             }
-        };
+            return Self::get_response_with_code("An error occured fetching data!", 501);
+        }
 
-        let Ok(response) = Response::builder()
-            .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from(
-                serde_json::to_string(&game_response.data).unwrap_or_default(),
-            )))
-        else {
-            return Self::get_response_with_code("An error occured while preparing data!", 501);
-        };
+        assert!(we_are_fetching);
+
+        let result = Self::do_active_players_fetch(&parent);
 
         {
             let mut cache = request_cache.lock().await;
 
-            cache.cached_status = Some(game_response.clone());
-            cache.cached_time = Some(chrono::Utc::now());
+            if let Ok((ref game_response, _)) = result {
+                cache.cached_status = Some(game_response.clone());
+                cache.cached_time = Some(chrono::Utc::now());
+            }
+
+            if let Some(notify) = cache.refresh_notify.take() {
+                notify.notify_waiters();
+            }
         }
 
-        Ok(response)
+        match result {
+            Ok((_, response)) | Err(response) => Ok(response),
+        }
+    }
+
+    fn do_active_players_fetch(
+        parent: &WebServer,
+    ) -> Result<(GameResponse, Response<Full<Bytes>>), Response<Full<Bytes>>> {
+        let query = serde_json::to_string(&GameRequest {
+            query: "active_mobs".to_string(),
+            auth: Some(parent.config.comms_key.clone()),
+            source: "byond-twitch-web".to_string(),
+        })
+        .map_err(|_| {
+            Self::get_response_with_code("An error occured preparing to fetch data!", 501).unwrap()
+        })?;
+
+        let mut address =
+            parent.config.host.to_socket_addrs().map_err(|_| {
+                Self::get_response_with_code("Internal server error.", 501).unwrap()
+            })?;
+
+        let next = address
+            .next()
+            .ok_or_else(|| Self::get_response_with_code("Internal server error.", 501).unwrap())?;
+
+        let ByondTopicValue::String(mut received) =
+            http2byond::send_byond(&next, &query).map_err(|_| {
+                Self::get_response_with_code("An error occured fetching data!", 501).unwrap()
+            })?
+        else {
+            return Err(
+                Self::get_response_with_code("An error occured fetching data!", 501).unwrap(),
+            );
+        };
+
+        received.pop();
+
+        let game_response = serde_json::from_str::<GameResponse>(&received).map_err(|err| {
+            tracing::error!(err = ?err, "failed to deserialize game response");
+            Self::get_response_with_code("An error occured deserializing data!", 501).unwrap()
+        })?;
+
+        let response = Response::builder()
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(
+                serde_json::to_string(&game_response.data).unwrap_or_default(),
+            )))
+            .map_err(|_| {
+                Self::get_response_with_code("An error occured while preparing data!", 501).unwrap()
+            })?;
+
+        Ok((game_response, response))
     }
 
     async fn follow_player(
@@ -451,6 +505,9 @@ struct RequestCache {
 
     cached_status: Option<GameResponse>,
     cached_time: Option<DateTime<Utc>>,
+
+    /// When a fetch is in progress, waiters can subscribe to get notified when it completes
+    refresh_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[derive(Deserialize)]

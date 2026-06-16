@@ -749,7 +749,7 @@ impl Bot {
         };
 
         let ByondTopicValue::String(mut received) = http2byond::send_byond(address, &json)? else {
-            return Ok(());
+            return Err(eyre!("Invalid response from BYOND"));
         };
 
         received.pop();

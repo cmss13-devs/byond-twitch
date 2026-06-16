@@ -756,6 +756,8 @@ impl Bot {
 
         let response = serde_json::from_str::<GameResponse>(&received)?;
 
+        tracing::info!("Response from BYOND: {:?}", &response);
+
         if response.statuscode == 200 || response.statuscode == 303 {
             let _ = self
                 .client
@@ -785,7 +787,7 @@ struct GameRequest {
     source: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug)]
 #[allow(dead_code)]
 struct GameResponse {
     statuscode: i32,
@@ -793,7 +795,7 @@ struct GameResponse {
     data: Option<Vec<Player>>,
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 struct Player {
     name: String,
     job: Option<String>,
